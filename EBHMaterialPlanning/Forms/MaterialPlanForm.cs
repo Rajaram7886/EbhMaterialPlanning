@@ -258,7 +258,7 @@ namespace EBHMaterialPlanning
             rows = PlanService.LoadRows(picked, out skipped);
             HideLastPr();
             ShowRows();
-            if (rows.Count == 0) Warn("Nothing to request: every component of the selected Production Orders is already requested.");
+            if (rows.Count == 0) Alert("Nothing to request: every component of the selected Production Orders is already requested.");
             else Ok(rows.Count + " material row(s) loaded" + (skipped > 0 ? ", " + skipped + " component(s) already fully requested were left out." : "."));
         }
 
