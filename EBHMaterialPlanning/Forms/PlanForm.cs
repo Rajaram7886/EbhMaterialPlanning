@@ -309,6 +309,21 @@ namespace EBHMaterialPlanning
             ((SAPbouiCOM.StaticText)Add(uid, SAPbouiCOM.BoFormItemTypes.it_STATIC, left, top, width, 14).Specific).Caption = caption;
         }
 
+        /// <summary>
+        /// Bold section header with a thin divider line beneath it: pure visual grouping, carries no data.
+        /// Adds two items, "uid" (the caption) and "uid" + "L" (the line) - keep uid at 9 characters or fewer.
+        /// </summary>
+        protected void Section(string uid, string caption, int left, int top, int width)
+        {
+            SAPbouiCOM.Item head = Add(uid, SAPbouiCOM.BoFormItemTypes.it_STATIC, left, top, width, 14);
+            ((SAPbouiCOM.StaticText)head.Specific).Caption = caption;
+            head.TextStyle = (int)SAPbouiCOM.BoTextStyle.ts_BOLD;
+            head.ForeColor = GridTable.Rgb(37, 99, 235);
+            SAPbouiCOM.Item line = Add(uid + "L", SAPbouiCOM.BoFormItemTypes.it_STATIC, left, top + 16, width, 2);
+            ((SAPbouiCOM.StaticText)line.Specific).Caption = "";
+            line.BackColor = GridTable.Rgb(226, 232, 240);
+        }
+
         protected void Caption(string uid, string caption) { ((SAPbouiCOM.StaticText)Item(uid).Specific).Caption = caption; }
 
         private void Source(string uid, SAPbouiCOM.BoDataType type, int length)

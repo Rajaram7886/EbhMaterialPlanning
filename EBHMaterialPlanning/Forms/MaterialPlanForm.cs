@@ -8,11 +8,13 @@ namespace EBHMaterialPlanning
     /// Material Request Planning: Production Orders of the selected project -> their component materials ->
     /// one Purchase Request. Filters apply only when Search is pressed.
     /// Shortcuts: Ctrl+F focuses Production Order search, F5 searches, Alt+L focuses the material grid, Ctrl+Enter creates the Purchase Request.
+    /// Navigation: a Production Order already having a Purchase Request is shown in green; double-click it to open its linked requests.
     /// </summary>
     internal sealed class MaterialPlanForm : PlanForm
     {
         private GridTable gOrd, gRows;
         private List<ProductionOrder> orders = new List<ProductionOrder>();
+        private HashSet<int> ordersWithLinks = new HashSet<int>();     // DocEntry of orders with an existing Purchase Request (shown in green, double-click to see them)
         private List<PlanRow> rows = new List<PlanRow>();
         private bool multiBranch;
         private int lastPrEntry, lastPrNum;
@@ -24,7 +26,7 @@ namespace EBHMaterialPlanning
                 MaterialPlanForm open = OpenForms<MaterialPlanForm>().FirstOrDefault();
                 if (open != null) { open.Select(); return; }
                 var f = new MaterialPlanForm();
-                f.Create("EBHMRPPLN", "Material Request Planning", 980, 600, false, f.Build);
+                f.Create("EBHMRPPLN", "Material Request Planning", 980, 700, false, f.Build);
                 f.Focus("eProj");
             });
         }
@@ -33,17 +35,19 @@ namespace EBHMaterialPlanning
         private void Build()
         {
             // 1. Filters
-            Label("lProj", "Project", 8, 8, 50);
-            Edit("eProj", 62, 8, 230);
+            Section("hFilt", "Search Filters", 8, 6, 300);
+            Label("lProj", "Project", 8, 28, 50);
+            Edit("eProj", 62, 28, 230);
             Cfl("eProj", "63", "PrjCode", false);
-            Label("lFind", "Production Order", 306, 8, 110);
-            Edit("eFind", 420, 8, 160);
+            Label("lFind", "Production Order", 306, 28, 110);
+            Edit("eFind", 420, 28, 160);
             Cfl("eFind", "202", "DocNum", true);
-            Button("bFind", "Search", 588, 5, 70);
-            Button("bClear", "Clear", 664, 5, 70);
+            Button("bFind", "Search", 588, 25, 70);
+            Button("bClear", "Clear", 664, 25, 70);
 
             // 2. Production Orders
-            gOrd = Grid("gOrd", 8, 32, 964, 120)
+            Section("hOrd", "Production Orders", 8, 52, 300);
+            gOrd = Grid("gOrd", 8, 74, 964, 120)
                 .Column("Sel", "Select", width: 46, editable: true).CheckColumn("Sel")
                 .Column("No", "Order No.", SAPbouiCOM.BoFieldsType.ft_Integer, 70).LinkColumn("No", "202")
                 .Column("Ser", "Series", width: 90)
@@ -53,35 +57,38 @@ namespace EBHMaterialPlanning
                 .Column("Stat", "Status", width: 70)
                 .Column("Due", "Due Date", SAPbouiCOM.BoFieldsType.ft_Date, 80)
                 .Bind();
-            Button("bLoad", "Load Selected Materials", 8, 158, 150);
-            Button("bOSelAll", "Select All", 166, 158, 90);
-            Button("bODeselAl", "Deselect All", 262, 158, 100);
+            Button("bLoad", "Load Selected Materials", 8, 200, 150);
+            Button("bOSelAll", "Select All", 166, 200, 90);
+            Button("bODeselAl", "Deselect All", 262, 200, 100);
+            Label("lOrdHint", "Double-click a row to see its Purchase Requests", 376, 203, 280);
 
             // 3. Purchase Request header
-            Label("lSeries", "Target Document Series", 8, 182, 140);
-            Combo("cSeries", 152, 182, 110);
-            Label("lNextNo", "Doc.No", 266, 182, 55);
-            Field("fNextNo", 324, 182, 60, true);
-            Label("lBranch", "Branch", 392, 182, 45);
-            Combo("cBranch", 440, 182, 100);
-            Label("lReq", "Required Date", 548, 182, 85);
-            Edit("eReq", 636, 182, 90, SAPbouiCOM.BoDataType.dt_DATE);
-            Label("lValid", "Valid Until Date", 734, 182, 100);
-            Edit("eValid", 838, 182, 90, SAPbouiCOM.BoDataType.dt_DATE);
+            Section("hReq", "Request Details", 8, 224, 300);
+            Label("lSeries", "Target Document Series", 8, 246, 140);
+            Combo("cSeries", 152, 246, 110);
+            Label("lNextNo", "Doc.No", 266, 246, 55);
+            Field("fNextNo", 324, 246, 60, true);
+            Label("lBranch", "Branch", 392, 246, 45);
+            Combo("cBranch", 440, 246, 100);
+            Label("lReq", "Required Date", 548, 246, 85);
+            Edit("eReq", 636, 246, 90, SAPbouiCOM.BoDataType.dt_DATE);
+            Label("lValid", "Valid Until Date", 734, 246, 100);
+            Edit("eValid", 838, 246, 90, SAPbouiCOM.BoDataType.dt_DATE);
 
-            Label("lVend", "Vendor", 8, 204, 45);
-            Edit("eVend", 56, 204, 120);
+            Label("lVend", "Vendor", 8, 268, 45);
+            Edit("eVend", 56, 268, 120);
             Cfl("eVend", "2", "CardCode", false);
-            Label("lWhs", "Warehouse", 184, 204, 62);
-            Edit("eWhs", 250, 204, 120);
+            Label("lWhs", "Warehouse", 184, 268, 62);
+            Edit("eWhs", 250, 268, 120);
             Cfl("eWhs", "64", "WhsCode", false);
-            Button("bApply", "Apply Header to Selected Rows", 378, 204, 170);
-            Button("bApplyWhs", "Apply Warehouse to Selected Rows", 552, 204, 180);
-            Button("bSelAll", "Select All", 736, 204, 80);
-            Button("bDeselAll", "Deselect All", 820, 204, 100);
+            Button("bApply", "Apply Header to Selected Rows", 378, 268, 170);
+            Button("bApplyWhs", "Apply Warehouse to Selected Rows", 552, 268, 180);
+            Button("bSelAll", "Select All", 736, 268, 80);
+            Button("bDeselAll", "Deselect All", 820, 268, 100);
 
             // 4. Material details
-            gRows = Grid("gRows", 8, 228, 964, 280)
+            Section("hMat", "Materials", 8, 296, 300);
+            gRows = Grid("gRows", 8, 318, 964, 280)
                 .Column("Sel", "Select", width: 46, editable: true).CheckColumn("Sel")
                 .Column("Item", "Item No.", width: 100)
                 .Column("Desc", "Description", width: 180)
@@ -131,9 +138,13 @@ namespace EBHMaterialPlanning
 
         protected override void Layout()
         {
-            int w = Math.Max(900, Form.ClientWidth), h = Math.Max(420, Form.ClientHeight);
-            Place("gOrd", 8, 32, w - 16, 120);
-            Place("gRows", 8, 228, w - 16, h - 228 - 40);
+            int w = Math.Max(900, Form.ClientWidth), h = Math.Max(510, Form.ClientHeight);
+            Place("hFiltL", 8, 22, w - 16, 0);
+            Place("hOrdL", 8, 68, w - 16, 0);
+            Place("gOrd", 8, 74, w - 16, 120);
+            Place("hReqL", 8, 240, w - 16, 0);
+            Place("hMatL", 8, 312, w - 16, 0);
+            Place("gRows", 8, 318, w - 16, h - 318 - 40);
             Place("bCreate", 8, h - 30, 0, 0);
             Place("2", 162, h - 30, 0, 0);
             Place("bLinked", 236, h - 30, 0, 0);
@@ -226,6 +237,7 @@ namespace EBHMaterialPlanning
             Set("eFind", find);
 
             orders = Store.ListOrders(Codes(proj), find);
+            ordersWithLinks = new HashSet<int>(Store.OrdersWithLinkedRequests(orders.Select(o => o.DocEntry)));
             ShowOrders();
             if (orders.Count == 0) Warn("No Production Order found for this search.");
         }
@@ -238,8 +250,12 @@ namespace EBHMaterialPlanning
                 {
                     o.Selected ? "Y" : "N", o.DocNum, o.SeriesName, o.Project, o.ItemCode, o.ItemName, o.Status == "R" ? "Released" : "Planned", ToDate(o.DueDate)
                 }).ToList());
+                for (int i = 0; i < orders.Count; i++)
+                    gOrd.Color(i, !orders[i].Selected ? GridTable.Grey : ordersWithLinks.Contains(orders[i].DocEntry) ? GridTable.Green : GridTable.NoColor);
+                int linked = orders.Count(o => ordersWithLinks.Contains(o.DocEntry));
                 Caption("lFoot", orders.Count == 0 ? "No Production Order found for this search."
-                    : orders.Count(o => o.Selected) + " of " + orders.Count + " Production Order(s) selected");
+                    : orders.Count(o => o.Selected) + " of " + orders.Count + " Production Order(s) selected" +
+                    (linked > 0 ? " (" + linked + " shown in green already have a Purchase Request - double-click to see them)" : ""));
             });
         }
 
@@ -267,6 +283,7 @@ namespace EBHMaterialPlanning
             Set("eProj", "");
             Set("eFind", "");
             orders = new List<ProductionOrder>();
+            ordersWithLinks = new HashSet<int>();
             rows = new List<PlanRow>();
             HideLastPr();
             ShowOrders();
@@ -430,6 +447,12 @@ namespace EBHMaterialPlanning
             else if (Pressed(e, "bLastPr")) { if (lastPrEntry > 0) Store.OpenPurchaseRequest(lastPrEntry); }
             else if (Pressed(e, "bLinked")) LinkedRequestForm.Show(CurrentPdo());
             else if (Clicked(e, gRows)) gRows.Click(e.Row);
+            else if (DoubleClicked(e, gOrd))
+            {
+                // Quick navigation: jump straight to this order's Purchase Requests without loading materials first
+                int tr = gOrd.Row(e.Row);
+                if (tr >= 0 && tr < orders.Count) LinkedRequestForm.Show(orders[tr].DocEntry);
+            }
             else if (e.ItemUID == "gOrd" && !e.BeforeAction && e.Row >= 0 &&
                 ((e.EventType == SAPbouiCOM.BoEventTypes.et_VALIDATE && e.ItemChanged) || (e.EventType == SAPbouiCOM.BoEventTypes.et_ITEM_PRESSED && e.ColUID == "Sel")))
             {

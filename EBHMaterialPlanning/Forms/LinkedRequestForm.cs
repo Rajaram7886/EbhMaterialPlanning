@@ -7,6 +7,7 @@ namespace EBHMaterialPlanning
     /// <summary>
     /// Purchase Requests of one Production Order: every request line raised from it, with the request status.
     /// Shortcuts: F5 refreshes, Enter opens the selected Purchase Request, Esc closes the window.
+    /// "Back to Material Planning" returns to (or opens) the main planning screen.
     /// </summary>
     internal sealed class LinkedRequestForm : PlanForm
     {
@@ -52,7 +53,8 @@ namespace EBHMaterialPlanning
             Button("bOpen", "Open Purchase Request", 8, 320, 140);
             Button("bRefresh", "Refresh", 152, 320, 70);
             Button("2", "Close", 226, 320, 70);
-            Label("lFoot", "", 310, 323, 400);
+            Button("bBack", "Back to Material Planning", 304, 320, 170);
+            Label("lFoot", "", 484, 323, 330);
             Reload();
         }
 
@@ -63,7 +65,8 @@ namespace EBHMaterialPlanning
             Place("bOpen", 8, h - 30, 0, 0);
             Place("bRefresh", 152, h - 30, 0, 0);
             Place("2", 226, h - 30, 0, 0);
-            Place("lFoot", 310, h - 27, 0, 0);
+            Place("bBack", 304, h - 30, 0, 0);
+            Place("lFoot", 484, h - 27, 0, 0);
         }
 
         public void Reload()
@@ -121,6 +124,7 @@ namespace EBHMaterialPlanning
             else if (DoubleClicked(e, gList)) { gList.Click(e.Row); Store.OpenPurchaseRequest(CurrentRow().PrEntry); }
             else if (Pressed(e, "bOpen")) Store.OpenPurchaseRequest(CurrentRow().PrEntry);
             else if (Pressed(e, "bRefresh")) Reload();
+            else if (Pressed(e, "bBack")) MaterialPlanForm.Show();
             else if (Key(e, 116)) Reload();                               // F5
             else if (Key(e, 13) && gList.Current >= 0) Store.OpenPurchaseRequest(CurrentRow().PrEntry);
             else if (Key(e, 27)) Close();                                 // Esc
