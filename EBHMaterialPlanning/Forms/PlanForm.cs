@@ -272,10 +272,16 @@ namespace EBHMaterialPlanning
             return e.EventType == SAPbouiCOM.BoEventTypes.et_ITEM_PRESSED && !e.BeforeAction && e.ItemUID == uid;
         }
 
-        /// <summary>Enter pressed in an edit field.</summary>
+        /// <summary>Enter pressed in an edit field (no Ctrl/Alt held, so it does not also match a Ctrl+Enter shortcut).</summary>
         protected static bool Enter(SAPbouiCOM.ItemEvent e, params string[] uids)
         {
-            return e.EventType == SAPbouiCOM.BoEventTypes.et_KEY_DOWN && !e.BeforeAction && e.CharPressed == 13 && uids.Contains(e.ItemUID);
+            return Key(e, 13) && uids.Contains(e.ItemUID);
+        }
+
+        /// <summary>A key combination pressed anywhere on the form, whatever item has focus. CharPressed uses the same codes as virtual-key / ASCII (e.g. 13 Enter, 27 Esc, 114 F3, 'A'..'Z' for a letter).</summary>
+        protected static bool Key(SAPbouiCOM.ItemEvent e, int charPressed, SAPbouiCOM.BoModifiersEnum modifiers = SAPbouiCOM.BoModifiersEnum.mt_None)
+        {
+            return e.EventType == SAPbouiCOM.BoEventTypes.et_KEY_DOWN && !e.BeforeAction && e.CharPressed == charPressed && e.Modifiers == modifiers;
         }
         #endregion
 

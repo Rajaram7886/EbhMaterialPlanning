@@ -7,6 +7,7 @@ namespace EBHMaterialPlanning
     /// <summary>
     /// Material Request Planning: Production Orders of the selected project -> their component materials ->
     /// one Purchase Request. Filters apply only when Search is pressed.
+    /// Shortcuts: Ctrl+F focuses Production Order search, F5 searches, Alt+L focuses the material grid, Ctrl+Enter creates the Purchase Request.
     /// </summary>
     internal sealed class MaterialPlanForm : PlanForm
     {
@@ -386,7 +387,11 @@ namespace EBHMaterialPlanning
         {
             List<string> chosen;
             int gridRow;
-            if (e.EventType == SAPbouiCOM.BoEventTypes.et_CHOOSE_FROM_LIST && e.BeforeAction && e.ItemUID == "eProj") FilterProjectCfl();
+            if (Key(e, 'F', SAPbouiCOM.BoModifiersEnum.mt_CTRL)) Focus("eFind");
+            else if (Key(e, 116)) Search();                                                                   // F5
+            else if (Key(e, 'L', SAPbouiCOM.BoModifiersEnum.mt_ALT)) Focus("gRows");
+            else if (Key(e, 13, SAPbouiCOM.BoModifiersEnum.mt_CTRL)) CreateRequest();
+            else if (e.EventType == SAPbouiCOM.BoEventTypes.et_CHOOSE_FROM_LIST && e.BeforeAction && e.ItemUID == "eProj") FilterProjectCfl();
             else if (e.EventType == SAPbouiCOM.BoEventTypes.et_CHOOSE_FROM_LIST && e.BeforeAction && e.ItemUID == "eFind") FilterFindCfl();
             else if ((chosen = ChosenCodes(e, "eProj", "PrjCode")).Count > 0) Set("eProj", chosen[0]);
             else if ((chosen = ChosenCodes(e, "eFind", "DocNum")).Count > 0)

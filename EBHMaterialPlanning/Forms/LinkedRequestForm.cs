@@ -4,7 +4,10 @@ using System.Linq;
 
 namespace EBHMaterialPlanning
 {
-    /// <summary>Purchase Requests of one Production Order: every request line raised from it, with the request status.</summary>
+    /// <summary>
+    /// Purchase Requests of one Production Order: every request line raised from it, with the request status.
+    /// Shortcuts: F5 refreshes, Enter opens the selected Purchase Request, Esc closes the window.
+    /// </summary>
     internal sealed class LinkedRequestForm : PlanForm
     {
         private GridTable gList;
@@ -118,6 +121,9 @@ namespace EBHMaterialPlanning
             else if (DoubleClicked(e, gList)) { gList.Click(e.Row); Store.OpenPurchaseRequest(CurrentRow().PrEntry); }
             else if (Pressed(e, "bOpen")) Store.OpenPurchaseRequest(CurrentRow().PrEntry);
             else if (Pressed(e, "bRefresh")) Reload();
+            else if (Key(e, 116)) Reload();                               // F5
+            else if (Key(e, 13) && gList.Current >= 0) Store.OpenPurchaseRequest(CurrentRow().PrEntry);
+            else if (Key(e, 27)) Close();                                 // Esc
         }
     }
 }
