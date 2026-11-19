@@ -56,6 +56,17 @@ namespace EBHMaterialPlanning
             return list;
         }
 
+        /// <summary>Runs a non-query statement (Insert / Update / Delete) - e.g. writing a row of the Production
+        /// Order traceability mapping table, inside the same DI API connection / transaction as the document
+        /// that triggered it, so it commits or rolls back together with that document.</summary>
+        public static void Exec(string sql)
+        {
+            SAPbobsCOM.Recordset oRs = (SAPbobsCOM.Recordset)Company.GetBusinessObject(SAPbobsCOM.BoObjectTypes.BoRecordset);
+            try { oRs.DoQuery(sql); }
+            catch (COMException ex) { throw new PlanException(500, "Database update failed: " + ex.Message); }
+            finally { Marshal.ReleaseComObject(oRs); }
+        }
+
         public static Dictionary<string, object> FirstRow(string sql)
         {
             var rows = Rows(sql);

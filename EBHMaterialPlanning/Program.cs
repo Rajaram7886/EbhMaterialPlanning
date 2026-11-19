@@ -35,6 +35,7 @@ namespace EBHMaterialPlanning
                 Application.SBO_Application.AppEvent += new SAPbouiCOM._IApplicationEvents_AppEventEventHandler(SBO_Application_AppEvent);
                 PlanForm.Start();
                 ProductionHook.Start();
+                GrpoHook.Start();
                 oApp.Run();
             }
             catch (Exception ex)

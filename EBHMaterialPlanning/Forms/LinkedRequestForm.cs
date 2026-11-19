@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Linq;
 
@@ -24,10 +24,11 @@ namespace EBHMaterialPlanning
         private List<DisplayRow> display = new List<DisplayRow>();
 
         private static readonly Dictionary<string, string> StatusNames = new Dictionary<string, string> { { "O", "Open" }, { "C", "Closed" }, { "X", "Cancelled" } };
+        private static string StatusName(string code) { return StatusNames.ContainsKey(code) ? StatusNames[code] : code; }
 
         public static void Show(int pdoEntry)
         {
-            Run(() =>
+            RunShow<LinkedRequestForm>(() =>
             {
                 LinkedRequestForm open = OpenForms<LinkedRequestForm>().FirstOrDefault(x => x.pdoEntry == pdoEntry);
                 if (open != null) { open.Select(); open.Reload(); return; }
@@ -39,6 +40,7 @@ namespace EBHMaterialPlanning
         private void Build()
         {
             gList = Grid("gList", 8, 8, 824, 300)
+                .Column("Sr", "#", SAPbouiCOM.BoFieldsType.ft_Integer, 40)
                 .Column("Series", "Series", width: 80)
                 .Column("PR", "Purchase Request", SAPbouiCOM.BoFieldsType.ft_Integer, 80)
                 .Column("Line", "Row", SAPbouiCOM.BoFieldsType.ft_Integer, 40)
@@ -49,7 +51,9 @@ namespace EBHMaterialPlanning
                 .Column("PdoLine", "Component Line", SAPbouiCOM.BoFieldsType.ft_Integer, 90)
                 .Column("Qty", "Quantity", SAPbouiCOM.BoFieldsType.ft_Quantity, 80)
                 .Column("Open", "Open Qty", SAPbouiCOM.BoFieldsType.ft_Quantity, 80)
+                .Sortable("Item", "Desc", "Stat", "Date")
                 .Bind();
+            SortWith(gList, ShowList);
             Button("bOpen", "Open Purchase Request", 8, 320, 140);
             Button("bRefresh", "Refresh", 152, 320, 70);
             Button("2", "Close", 226, 320, 70);
@@ -75,12 +79,19 @@ namespace EBHMaterialPlanning
             try { Store.Sync(new[] { pdoEntry }); }
             catch (Exception ex) { Warn("Production Order not refreshed : " + ex.Message); }
             lines = Store.LinkedRequests(pdoEntry);
+            ShowList();
+        }
 
+        private void ShowList()
+        {
             // One banner row per Purchase Request ("Series / No.") above its detail lines; lines already arrive
             // grouped (sorted by DocNum then LineNum), so a change of PrEntry marks the start of the next group.
+            // A title sort (Item No. / Description / Status / Date) orders the lines within each Purchase Request, never across them.
+            var ordered = lines.GroupBy(l => l.PrEntry)
+                .SelectMany(g => gList.Sort(g.ToList(), (c, l) => c == "Item" ? l.ItemCode : c == "Desc" ? l.Description : c == "Stat" ? StatusName(l.Status) : c == "Date" ? l.PostingDate : ""));
             display = new List<DisplayRow>();
             int lastPr = -1;
-            foreach (LinkedRequest l in lines)
+            foreach (LinkedRequest l in ordered)
             {
                 if (l.PrEntry != lastPr)
                 {
@@ -92,16 +103,16 @@ namespace EBHMaterialPlanning
 
             Freeze(() =>
             {
-                gList.Fill(display.Select(d =>
+                gList.Fill(display.Select((d, i) =>
                 {
                     // The group header carries no LinkedRequest of its own; borrow Series / Number from its group's first line.
                     LinkedRequest first = d.Line ?? lines.First(l => l.PrEntry == d.PrEntry);
                     return d.Line == null
-                        ? new object[] { first.SeriesName, first.PrNum, 0, ToDate(first.PostingDate), "", "", "Purchase Request " + first.SeriesName + " " + first.PrNum, 0, 0m, 0m }
+                        ? new object[] { i + 1, first.SeriesName, first.PrNum, 0, ToDate(first.PostingDate), "", "", "Purchase Request " + first.SeriesName + " " + first.PrNum, 0, 0m, 0m }
                         : new object[]
                         {
-                            d.Line.SeriesName, d.Line.PrNum, d.Line.PrLine, ToDate(d.Line.PostingDate),
-                            StatusNames.ContainsKey(d.Line.Status) ? StatusNames[d.Line.Status] : d.Line.Status,
+                            i + 1, d.Line.SeriesName, d.Line.PrNum, d.Line.PrLine, ToDate(d.Line.PostingDate),
+                            StatusName(d.Line.Status),
                             d.Line.ItemCode, d.Line.Description, d.Line.PdoLine, d.Line.Quantity, d.Line.OpenQuantity
                         };
                 }).ToList());

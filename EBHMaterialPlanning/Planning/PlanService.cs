@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 
 namespace EBHMaterialPlanning
@@ -20,9 +21,16 @@ namespace EBHMaterialPlanning
         }
 
         /// <summary>Row total before tax: quantity x price after discount.</summary>
-        public static decimal Total(decimal quantity, decimal price, decimal discount)
+        public static decimal Total(decimal quantity, decimal priceAfterDiscount)
         {
-            return Math.Round(quantity * AfterDiscount(price, discount), 2);
+            return Math.Round(quantity * priceAfterDiscount, 2);
+        }
+
+        /// <summary>The member of a merged row whose price wins: the lowest Price After Discount among those actually
+        /// priced (an unpriced 0 never wins over a real price); the first member when none is priced.</summary>
+        public static T Cheapest<T>(IList<T> members, Func<T, decimal> priceAfterDiscount) where T : class
+        {
+            return members.Where(m => priceAfterDiscount(m) > 0).OrderBy(priceAfterDiscount).FirstOrDefault() ?? members[0];
         }
         #endregion
 
@@ -34,6 +42,9 @@ namespace EBHMaterialPlanning
             skipped = 0;
             var components = Store.GetComponents(pdoEntries).ToList();
             var linked = new HashSet<int>(Store.OrdersWithLinkedRequests(components.Select(c => c.PdoEntry).Distinct()));
+            // Every loaded row starts with Required Date = today and Valid Until = today + 1 month (still editable per row)
+            string today = DateTime.Today.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+            string inAMonth = DateTime.Today.AddMonths(1).ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
             foreach (Component c in components)
             {
                 if (c.Balance <= 0) { skipped++; continue; }
@@ -42,7 +53,9 @@ namespace EBHMaterialPlanning
                     PdoEntry = c.PdoEntry, PdoNum = c.PdoNum, PdoLine = c.PdoLine, Project = c.Project,
                     ItemCode = c.ItemCode, Description = c.Description, Uom = c.Uom,
                     Quantity = c.Balance, Balance = c.Balance, AlreadyRequested = c.OpenRequested, Warehouse = c.Warehouse,
-                    HasLinkedRequest = linked.Contains(c.PdoEntry)
+                    Manufacturer = c.Manufacturer, ManufacturerName = c.ManufacturerName, HasLinkedRequest = linked.Contains(c.PdoEntry),
+                    Price = c.Price, Discount = c.Discount, PriceAfterDiscount = c.PriceAfterDiscount, Catalog = c.Catalog, TracksJobCode = c.TracksJobCode, PdoItemCode = c.PdoItemCode,
+                    RequiredDate = today, ValidUntil = inAMonth
                 });
             }
             return rows;
@@ -60,12 +73,6 @@ namespace EBHMaterialPlanning
             }
         }
 
-        /// <summary>Copies only the warehouse into the rows (header vendor and dates are left untouched).</summary>
-        public static void ApplyWarehouse(string warehouse, IEnumerable<PlanRow> rows)
-        {
-            if (string.IsNullOrEmpty(warehouse)) return;
-            foreach (PlanRow r in rows) r.Warehouse = warehouse;
-        }
         #endregion
 
         #region Checks
@@ -82,7 +89,6 @@ namespace EBHMaterialPlanning
             if (Store.MultiBranch && h.Branch <= 0) fail("cBranch", "Select the Branch.");
             if (h.RequiredDate.Length == 0) fail("eReq", "Enter the Required Date.");
             if (h.ValidUntil.Length == 0) fail("eValid", "Enter the Valid Until Date.");
-            if (h.Vendor.Length == 0) fail("eVend", "Select the Vendor.");
             if (h.Warehouse.Length == 0) fail("eWhs", "Select the Warehouse.");
 
             var picked = rows.Select((r, i) => new { Row = r, No = i + 1 }).Where(x => x.Row.Selected).ToList();
@@ -97,7 +103,6 @@ namespace EBHMaterialPlanning
                 if (r.Price < 0) fail("gRows", at + ": price cannot be negative.");
                 if (r.Discount < 0 || r.Discount > 100) fail("gRows", at + ": discount must be between 0 and 100.");
                 if (r.Warehouse.Length == 0) fail("gRows", at + ": warehouse is missing.");
-                if (r.Vendor.Length == 0) fail("gRows", at + ": vendor is missing.");
                 if (r.RequiredDate.Length == 0) fail("gRows", at + ": required date is missing.");
                 if (r.ValidUntil.Length == 0) fail("gRows", at + ": valid until date is missing.");
             }
@@ -118,5 +123,78 @@ namespace EBHMaterialPlanning
             Validate(h, rows);
             return Store.CreatePurchaseRequest(h, rows.Where(r => r.Selected).ToList());
         }
+
+        #region Purchase Order
+        /// <summary>One row per ticked Purchase Request line (DocEntry, LineNum), re-read fresh from SAP.</summary>
+        public static List<PoRow> LoadPoRows(IEnumerable<KeyValuePair<int, int>> lineKeys)
+        {
+            return Store.GetRequestLines(lineKeys);
+        }
+
+        /// <summary>The given Purchase Request lines (DocEntry, LineNum) re-read fresh, whatever their current status -
+        /// used to refresh the picker grid's own rows after drawing a Purchase Order from some of them.</summary>
+        public static List<PurchaseRequestLine> RefreshRequestLines(IEnumerable<KeyValuePair<int, int>> lineKeys)
+        {
+            return Store.RefreshRequestLines(lineKeys);
+        }
+
+        /// <summary>
+        /// The basic checks before creating the Purchase Order. Throws a PlanException that names the field or row to correct.
+        /// Rows are named by the grid's "#" (PoRow.SrNo).
+        /// </summary>
+        public static void ValidatePo(PoHeader h, IList<PoRow> rows)
+        {
+            var errors = new List<Dictionary<string, string>>();
+            Action<string, string> fail = (field, message) => errors.Add(new Dictionary<string, string> { { "field", field }, { "message", message } });
+
+            if (h.Series <= 0) fail("cSeries", "Select the Target Document Series.");
+            if (Store.MultiBranch && h.Branch <= 0) fail("cBranch", "Select the Branch.");
+            if (h.Vendor.Length == 0) fail("eVend", "Select the Vendor.");
+            if (h.DueDate.Length == 0) fail("eDue", "Enter the Delivery Date.");
+
+            var picked = rows.Select((r, i) => new { Row = r, No = i + 1 }).Where(x => x.Row.Selected).ToList();
+            if (picked.Count == 0) fail("gRows", "Select at least one material row.");
+            foreach (var x in picked)
+            {
+                PoRow r = x.Row;
+                string at = (r.SrNo > 0 ? "Sr No " + r.SrNo : "Row hidden by the Manufacturer filter") + " (" + r.ItemCode + ", Purchase Request " + r.PrNum + ")";
+                if (r.PrEntry <= 0 || r.ItemCode.Length == 0) fail("gRows", at + " has no source Purchase Request.");
+                if (r.Quantity <= 0) fail("gRows", at + ": quantity must be more than 0.");
+                else if (r.Quantity > r.OpenQuantity) fail("gRows", at + ": quantity " + r.Quantity.ToString("0.######") + " is more than the " + r.OpenQuantity.ToString("0.######") + " still open.");
+                if (r.Price <= 0) fail("gRows", at + ": enter a price more than 0.");
+                if (r.Discount < 0 || r.Discount > 100) fail("gRows", at + ": discount must be between 0 and 100.");
+                else if (PriceOverCap(r.PriceAfterDiscount, r.MaxPriceAfterDiscount)) fail("gRows", at + ": " + PriceCapMessage(r.PriceAfterDiscount, r.MaxPriceAfterDiscount));
+                if (r.Warehouse.Length == 0) fail("gRows", at + ": warehouse is missing.");
+                if (r.TaxCode.Length == 0) fail("gRows", at + ": tax code is missing (set it on the source Purchase Request line).");
+                // A row can only have reached the grid under a different Vendor if it was loaded before the Vendor filter
+                // changed; the Purchase Order targets a single Vendor (h.Vendor), so such a row must not go through.
+                if (h.Vendor.Length > 0 && r.Vendor.Length > 0 && !string.Equals(r.Vendor, h.Vendor, StringComparison.OrdinalIgnoreCase))
+                    fail("gRows", at + ": belongs to Vendor " + r.Vendor + ", not " + h.Vendor + ". Remove it or reload for the right Vendor.");
+            }
+            if (errors.Count > 0)
+                throw new PlanException(400, string.Join(Environment.NewLine, errors.Take(8).Select(e => e["message"]).ToArray()) +
+                    (errors.Count > 8 ? Environment.NewLine + "... and " + (errors.Count - 8) + " more." : ""), errors);
+        }
+
+        /// <summary>Price less Discount % is above the Production Order's planned Price After Discount (0 = no planned price, no limit).</summary>
+        public static bool PriceOverCap(decimal priceAfterDiscount, decimal cap)
+        {
+            return cap > 0 && priceAfterDiscount > cap;
+        }
+
+        public static string PriceCapMessage(decimal priceAfterDiscount, decimal cap)
+        {
+            return "Price After Discount " + priceAfterDiscount.ToString("0.######", CultureInfo.InvariantCulture) +
+                " is more than the Production Order's Price After Discount " + cap.ToString("0.######", CultureInfo.InvariantCulture) +
+                ". Price is not allowed to be more than " + cap.ToString("0.######", CultureInfo.InvariantCulture) + ".";
+        }
+
+        /// <summary>Validates and creates the Purchase Order for the selected rows.</summary>
+        public static CreatedOrder CreatePo(PoHeader h, IList<PoRow> rows)
+        {
+            ValidatePo(h, rows);
+            return Store.CreatePurchaseOrder(h, rows.Where(r => r.Selected).ToList());
+        }
+        #endregion
     }
 }

@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<AddOnRegData xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema" SlientInstallation="No" SlientUpgrade="No" Partnernmsp="ERPBOTHUB" SchemaVersion="3.0" Type="" MultipleVersion="true" OnDemand="" OnPremise="" ExtName="EBHMaterialPlanning" ExtVersion="1.0.1" Contdata="EBH Team" Partner="ERPBOTHUB" DBType="Both" ClientType="A">
+<AddOnRegData xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema" SlientInstallation="No" SlientUpgrade="No" Partnernmsp="ERPBOTHUB" SchemaVersion="3.0" Type="" MultipleVersion="true" OnDemand="" OnPremise="" ExtName="EBHMaterialPlanning" ExtVersion="1.0.13" Contdata="EBH Team" Partner="ERPBOTHUB" DBType="Both" ClientType="A">
   <Validity>
     <SBOCompatibility>
       <Version From="" To="" />
@@ -18,7 +18,7 @@
   </Configuration>
   <Addons>
     <Addon Name="" Group="" ForceFlag="" Visible="" AutoAssign="" SelfUpgrd="">
-      <x86 AddonExe="C:\Users\rajaram\Desktop\ACPL LLP\EBH Material Planning\EBHMaterialPlanning\bin\x64\Debug\EBHMaterialPlanning.exe" AddonSig="">
+      <x86 AddonExe="C:\Users\rajaram\Desktop\EBH Material Planning - New\EBHMaterialPlanning\bin\x64\Debug\EBHMaterialPlanning.exe" AddonSig="">
         <Installation>
           <Files>
             <File FileName="EBHMaterialPlanning.b1s">
@@ -76,7 +76,7 @@
           </Files>
         </Uninstallation>
       </x86>
-      <x64 AddonExe="C:\Users\rajaram\Desktop\ACPL LLP\EBH Material Planning\EBHMaterialPlanning\bin\x64\Debug\EBHMaterialPlanning.exe" AddonSig="">
+      <x64 AddonExe="C:\Users\rajaram\Desktop\EBH Material Planning - New\EBHMaterialPlanning\bin\x64\Debug\EBHMaterialPlanning.exe" AddonSig="">
         <Installation>
           <Files>
             <File FileName="EBHMaterialPlanning.b1s">

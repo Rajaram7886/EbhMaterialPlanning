@@ -94,10 +94,15 @@
     <Compile Include="Forms\PlanForm.cs" />
     <Compile Include="Forms\MaterialPlanForm.cs" />
     <Compile Include="Forms\LinkedRequestForm.cs" />
+    <Compile Include="Forms\PurchaseOrderForm.cs" />
     <Compile Include="Planning\PlanModels.cs" />
     <Compile Include="Planning\PlanService.cs" />
     <Compile Include="Planning\PlanStore.cs" />
+    <Compile Include="Planning\GrpoDraftModels.cs" />
+    <Compile Include="Planning\BinAllocationService.cs" />
+    <Compile Include="Planning\GrpoDraftService.cs" />
     <Compile Include="ProductionHook.cs" />
+    <Compile Include="GrpoHook.cs" />
     <Compile Include="DataBaseFrm\DBSetup.b1f.cs" />
     <Compile Include="Program.cs" />
     <Compile Include="Menu.cs" />

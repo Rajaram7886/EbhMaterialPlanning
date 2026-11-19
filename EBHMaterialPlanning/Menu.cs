@@ -16,6 +16,7 @@ namespace EBHMaterialPlanning
                 //Addon Menu Setup
                 EBH.AddMenu("43520", SAPbouiCOM.BoMenuType.mt_POPUP, "Mrp_ERPBotHub", "EBH Material Planning", -1, "Menu.png");
                 EBH.AddMenu("Mrp_ERPBotHub", SAPbouiCOM.BoMenuType.mt_STRING, "frmMrpPlan", "Material Request Planning", -1, "Menu.png");
+                EBH.AddMenu("Mrp_ERPBotHub", SAPbouiCOM.BoMenuType.mt_STRING, "frmMrpPo", "Purchase Order Planning", -1, "Menu.png");
             }
             catch (Exception ex)
             {
@@ -36,6 +37,7 @@ namespace EBHMaterialPlanning
                 }
                 //Addon Menu
                 if (pVal.MenuUID == "frmMrpPlan") MaterialPlanForm.Show();
+                if (pVal.MenuUID == "frmMrpPo") PurchaseOrderForm.Show();
             }
             catch (Exception ex)
             {
