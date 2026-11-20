@@ -72,7 +72,14 @@ namespace EBHMaterialPlanning
         public bool Selected = true;
         public int PdoEntry, PdoNum, PdoLine;
         public string ItemCode = "", Description = "", Uom = "";
+        /// <summary>Display only: what is still to be planned for the source component (= Balance when loaded).</summary>
         public decimal Quantity;
+        /// <summary>PRQTY: the quantity that goes onto the Purchase Request (starts = Quantity).</summary>
+        public decimal PrQuantity;
+        /// <summary>ITRQTY: the quantity that goes onto the Inventory Transfer Request (starts = 0).</summary>
+        public decimal ItrQuantity;
+        /// <summary>Warehouse the Inventory Transfer Request takes the ITRQTY from (the row's Warehouse is the target; may be the same one).</summary>
+        public string FromWarehouse = "";
         public decimal Balance;             // what may still be requested for the source component
         public decimal AlreadyRequested;    // quantity already on an open Purchase Request for this component
         public bool HasLinkedRequest;       // the source Production Order already has a Purchase Request raised from it (any line, any status)
@@ -91,13 +98,15 @@ namespace EBHMaterialPlanning
         public List<PlanRow> MergedFrom;
 
         public decimal PriceAfterDiscount;  // WOR1.U_EBH_PAFDI of the source component (the lowest one on a merged row)
-        /// <summary>Price After Discount x Quantity - the component's own WOR1.U_EBH_Line_Total for an unmerged row.</summary>
-        public decimal Total { get { return PlanService.Total(Quantity, PriceAfterDiscount); } }
+        /// <summary>Price After Discount x PRQTY - the value of what goes onto the Purchase Request.</summary>
+        public decimal Total { get { return PlanService.Total(PrQuantity, PriceAfterDiscount); } }
     }
 
-    /// <summary>A Purchase Request line that was raised from a Production Order component.</summary>
+    /// <summary>A Purchase Request (DocType "PR") or Inventory Transfer Request (DocType "ITR") line raised from a
+    /// Production Order component. PrEntry / PrNum / PrLine are that document's own DocEntry / DocNum / LineNum.</summary>
     public sealed class LinkedRequest
     {
+        public string DocType = "PR";
         public int PrEntry, PrNum, PrLine;
         public int Series;
         public string SeriesName = "";
@@ -108,10 +117,18 @@ namespace EBHMaterialPlanning
         public decimal Quantity, OpenQuantity;
     }
 
-    /// <summary>Result of creating a Purchase Request.</summary>
+    /// <summary>Result of creating a Purchase Request or an Inventory Transfer Request.</summary>
     public sealed class CreatedRequest
     {
         public int DocEntry, DocNum;
+        public string Warning = "";         // set when the Production Order side could not be refreshed
+    }
+
+    /// <summary>Result of one Create press on Material Request Planning: the Purchase Request and/or the Inventory
+    /// Transfer Request added (null when that document was not part of the press).</summary>
+    public sealed class CreatedDocuments
+    {
+        public CreatedRequest Pr, Itr;
         public string Warning = "";         // set when the Production Order side could not be refreshed
     }
 

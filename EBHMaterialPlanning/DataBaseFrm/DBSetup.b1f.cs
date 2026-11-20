@@ -405,6 +405,13 @@ namespace EBHMaterialPlanning
             step("POR1.U_EBH_LINETOTAL", () => CreateLinkField("POR1", "EBH_LINETOTAL", "Line Total", SAPbobsCOM.BoFieldTypes.db_Float, SAPbobsCOM.BoFldSubTypes.st_Sum, 15, SAPbobsCOM.UDFLinkedSystemObjectTypesEnum.ulNone));
             #endregion
 
+            #region Inventory Transfer Request raised from Material Request Planning (ITRQTY)
+            // @EBH_ITRMAP: which Production Order component(s) each ITR line covers - counted as "already requested"
+            step("@EBH_ITRMAP", () => CreateMappingTable("EBH_ITRMAP", "ITR Line - PDO Map", "Itr", "Inventory Transfer Request"));
+            step("WTQ1.U_EBH_PRODUCTIONNO", () => CreateLinkField("WTQ1", "EBH_PRODUCTIONNO", "Production Order No.", SAPbobsCOM.BoFieldTypes.db_Numeric, SAPbobsCOM.BoFldSubTypes.st_None, 11, SAPbobsCOM.UDFLinkedSystemObjectTypesEnum.ulProductionOrders));
+            step("OWTQ.U_EBH_REMARK", () => CreateLinkField("OWTQ", "EBH_REMARK", "EBH Remark", SAPbobsCOM.BoFieldTypes.db_Alpha, SAPbobsCOM.BoFldSubTypes.st_None, 254, SAPbobsCOM.UDFLinkedSystemObjectTypesEnum.ulNone));
+            #endregion
+
             if (errors.Count > 0) throw new Exception(errors.Count + " field(s)/table(s) failed - " + string.Join(" | ", errors.ToArray()));
         }
 
@@ -431,7 +438,17 @@ namespace EBHMaterialPlanning
         /// </summary>
         private void CreateMappingTable()
         {
-            const string table = "EBH_PRQMAP";
+            CreateMappingTable("EBH_PRQMAP", "PR Line - PDO Map", "Pr", "Purchase Request");
+        }
+
+        /// <summary>
+        /// One component-map table: <paramref name="prefix"/>Entry / <paramref name="prefix"/>Line (the document line),
+        /// PdoEntry / PdoLine (the Production Order component), Qty and <paramref name="prefix"/>Status. Used for
+        /// @EBH_PRQMAP (Purchase Request lines, prefix "Pr") and @EBH_ITRMAP (Inventory Transfer Request lines,
+        /// prefix "Itr"). Only what is missing is created.
+        /// </summary>
+        private void CreateMappingTable(string table, string description, string prefix, string docName)
+        {
             if (!TableExists(table))
             {
                 SAPbobsCOM.UserTablesMD oTable = null;
@@ -443,7 +460,7 @@ namespace EBHMaterialPlanning
                     // Order Component Map" (57 chars) was rejected outright with "Data too large for the field",
                     // the real cause behind every @EBH_PRQMAP failure so far (not any of its UDFs, all of which
                     // already have their own short, safe sizes).
-                    oTable.TableDescription = "PR Line - PDO Map";
+                    oTable.TableDescription = description;
                     oTable.TableType = SAPbobsCOM.BoUTBTableType.bott_NoObject;
                     if (oTable.Add() != 0) LastError("Table " + table);
                 }
@@ -456,8 +473,8 @@ namespace EBHMaterialPlanning
                 try { work(); }
                 catch (Exception ex) { fieldErrors.Add(what + " : " + ex.Message); Log("ERROR " + what + " : " + ex.Message); }
             };
-            field(table + ".U_PrEntry", () => CreateLinkField(table, "PrEntry", "Purchase Request DocEntry", SAPbobsCOM.BoFieldTypes.db_Numeric, SAPbobsCOM.BoFldSubTypes.st_None, 11, SAPbobsCOM.UDFLinkedSystemObjectTypesEnum.ulNone));
-            field(table + ".U_PrLine", () => CreateLinkField(table, "PrLine", "Purchase Request Line", SAPbobsCOM.BoFieldTypes.db_Numeric, SAPbobsCOM.BoFldSubTypes.st_None, 6, SAPbobsCOM.UDFLinkedSystemObjectTypesEnum.ulNone));
+            field(table + ".U_" + prefix + "Entry", () => CreateLinkField(table, prefix + "Entry", docName + " DocEntry", SAPbobsCOM.BoFieldTypes.db_Numeric, SAPbobsCOM.BoFldSubTypes.st_None, 11, SAPbobsCOM.UDFLinkedSystemObjectTypesEnum.ulNone));
+            field(table + ".U_" + prefix + "Line", () => CreateLinkField(table, prefix + "Line", docName + " Line", SAPbobsCOM.BoFieldTypes.db_Numeric, SAPbobsCOM.BoFldSubTypes.st_None, 6, SAPbobsCOM.UDFLinkedSystemObjectTypesEnum.ulNone));
             field(table + ".U_PdoEntry", () => CreateLinkField(table, "PdoEntry", "Production Order DocEntry", SAPbobsCOM.BoFieldTypes.db_Numeric, SAPbobsCOM.BoFldSubTypes.st_None, 11, SAPbobsCOM.UDFLinkedSystemObjectTypesEnum.ulNone));
             field(table + ".U_PdoLine", () => CreateLinkField(table, "PdoLine", "Production Order Line", SAPbobsCOM.BoFieldTypes.db_Numeric, SAPbobsCOM.BoFldSubTypes.st_None, 6, SAPbobsCOM.UDFLinkedSystemObjectTypesEnum.ulNone));
             // Float/Quantity UDFs in this company only proved reliable at size 10 (see WOR1.EBH_REQQTY) - size 19
@@ -469,7 +486,7 @@ namespace EBHMaterialPlanning
             // cancelled document. Every actual "already requested" / progress lookup still reads the LIVE status
             // from PRQ1 / OPRQ via the join, not this column, so a Purchase Request cancelled or closed afterwards
             // is still picked up correctly without this field ever needing to be kept in sync.
-            field(table + ".U_PrStatus", () => CreateLinkField(table, "PrStatus", "Purchase Request Status", SAPbobsCOM.BoFieldTypes.db_Alpha, SAPbobsCOM.BoFldSubTypes.st_None, 1, SAPbobsCOM.UDFLinkedSystemObjectTypesEnum.ulNone));
+            field(table + ".U_" + prefix + "Status", () => CreateLinkField(table, prefix + "Status", docName + " Status", SAPbobsCOM.BoFieldTypes.db_Alpha, SAPbobsCOM.BoFldSubTypes.st_None, 1, SAPbobsCOM.UDFLinkedSystemObjectTypesEnum.ulNone));
             if (fieldErrors.Count > 0) throw new Exception(string.Join(" | ", fieldErrors.ToArray()));
         }
 
@@ -567,16 +584,17 @@ namespace EBHMaterialPlanning
                 new[] { "OITM", "EBH_MfgCatlog" }, new[] { "PRQ1", "EBH_CATLOG" }, new[] { "POR1", "EBH_CATLOG" },
                 new[] { "OITB", "EBH_JOBCODNO" }, new[] { "PRQ1", "EBH_JOBCODNO" }, new[] { "POR1", "EBH_JOBCODNO" },
                 new[] { "PRQ1", "EBH_PRICEAFTERDISCOUNT" }, new[] { "POR1", "EBH_PRICEAFTERDISCOUNT" }, new[] { "PRQ1", "EBH_LINETOTAL" }, new[] { "POR1", "EBH_LINETOTAL" },
-                new[] { "EBH_PRQMAP", "PrEntry" }, new[] { "EBH_PRQMAP", "PrLine" }, new[] { "EBH_PRQMAP", "PdoEntry" }, new[] { "EBH_PRQMAP", "PdoLine" }, new[] { "EBH_PRQMAP", "Qty" }, new[] { "EBH_PRQMAP", "PrStatus" } })
+                new[] { "EBH_PRQMAP", "PrEntry" }, new[] { "EBH_PRQMAP", "PrLine" }, new[] { "EBH_PRQMAP", "PdoEntry" }, new[] { "EBH_PRQMAP", "PdoLine" }, new[] { "EBH_PRQMAP", "Qty" }, new[] { "EBH_PRQMAP", "PrStatus" },
+                new[] { "WTQ1", "EBH_PRODUCTIONNO" }, new[] { "OWTQ", "EBH_REMARK" },
+                new[] { "EBH_ITRMAP", "ItrEntry" }, new[] { "EBH_ITRMAP", "ItrLine" }, new[] { "EBH_ITRMAP", "PdoEntry" }, new[] { "EBH_ITRMAP", "PdoLine" }, new[] { "EBH_ITRMAP", "Qty" }, new[] { "EBH_ITRMAP", "ItrStatus" } })
                 if (FieldExists(f[0], f[1])) list.Add(f);
             return list;
         }
 
         /// <summary>Removes the @EBH_PRQMAP table itself, with its data - only once its own fields are gone (SAP
         /// refuses to drop a table that still has user fields on it).</summary>
-        private bool RemoveMappingTable()
+        private bool RemoveMappingTable(string table)
         {
-            const string table = "EBH_PRQMAP";
             if (!TableExists(table)) return true;
             SAPbobsCOM.UserTablesMD oTable = null;
             try
@@ -617,11 +635,13 @@ namespace EBHMaterialPlanning
             {
                 List<string[]> list = RemovalList();
                 bool hasMapTable = TableExists("EBH_PRQMAP");
+                bool hasItrMapTable = TableExists("EBH_ITRMAP");
                 string udf = string.Join(", ", list.ConvertAll(x => x[0] + ".U_" + x[1]).ToArray());
                 if (Program.SBO_App.MessageBox("Remove Add-On Environment will PERMANENTLY DELETE the user fields EBH Material Planning created, with their data " +
                     "(the link between Purchase Request lines and Production Orders):" + Environment.NewLine +
                     "- UDF : " + (udf.Length == 0 ? "(none)" : udf) + Environment.NewLine +
                     (hasMapTable ? "- Table : @EBH_PRQMAP (Production Order component map)" + Environment.NewLine : "") +
+                    (hasItrMapTable ? "- Table : @EBH_ITRMAP (Inventory Transfer Request component map)" + Environment.NewLine : "") +
                     "Not removed: ERPBotHub base / license tables." + Environment.NewLine +
                     "Do you want to continue?", 2, "Yes", "No") != 1) return;
                 if (Program.SBO_App.MessageBox("This cannot be undone. Are you sure you want to remove the EBH Material Planning environment from company '" + Program.oCompany.CompanyName + "'?", 2, "Yes", "No") != 1) return;
@@ -637,7 +657,8 @@ namespace EBHMaterialPlanning
                     foreach (string[] x in list) if (!RemoveSystemField(x[0], x[1])) ErrCount++;
                     // The table can only go once its own fields are gone (SAP refuses to drop a table still carrying
                     // user fields), so this runs last.
-                    if (hasMapTable) { FreeMetadata(); if (!RemoveMappingTable()) ErrCount++; }
+                    if (hasMapTable) { FreeMetadata(); if (!RemoveMappingTable("EBH_PRQMAP")) ErrCount++; }
+                    if (hasItrMapTable) { FreeMetadata(); if (!RemoveMappingTable("EBH_ITRMAP")) ErrCount++; }
                 }
                 finally { End(); }
                 Log("DONE  Remove Add-On Environment, errors " + ErrCount);

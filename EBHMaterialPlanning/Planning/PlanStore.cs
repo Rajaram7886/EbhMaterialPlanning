@@ -17,7 +17,7 @@ namespace EBHMaterialPlanning
         public const string FieldPdo = "U_EBH_PRODUCTIONNO", FieldPdoLine = "U_EBH_PRODLINE";
         /// <summary>Planned Price After Discount / Line Total of a Purchase Request (and Purchase Order) line - see CreatePurchaseRequest.</summary>
         public const string FieldPafd = "U_EBH_PRICEAFTERDISCOUNT", FieldLineTotal = "U_EBH_LINETOTAL";
-        private const int ObjPurchaseRequest = 1470000113, ObjProductionOrder = 202, ObjPurchaseOrder = 22;
+        private const int ObjPurchaseRequest = 1470000113, ObjProductionOrder = 202, ObjPurchaseOrder = 22, ObjInventoryTransferRequest = 1250000001;
         private static readonly CultureInfo Inv = CultureInfo.InvariantCulture;
 
         #region Helpers
@@ -62,9 +62,9 @@ namespace EBHMaterialPlanning
         }
 
         /// <summary>The add-on's remark goes to the header UDF U_EBH_REMARK (OPRQ / OPOR), not the standard Comments / Remarks, which stay free for the user.</summary>
-        private static void SetRemark(SAPbobsCOM.Documents oDoc, string text)
+        private static void SetRemark(SAPbobsCOM.UserFields header, string text)
         {
-            try { oDoc.UserFields.Fields.Item("U_EBH_REMARK").Value = Cut(text, 254); }
+            try { header.Fields.Item("U_EBH_REMARK").Value = Cut(text, 254); }
             catch (COMException)
             {
                 throw new PlanException(500, "The field U_EBH_REMARK is not set up in this company. Run Database Setup (Create All Environment), then restart SAP Business One.");
@@ -295,17 +295,29 @@ namespace EBHMaterialPlanning
             var ids = pdoEntries.Distinct().ToList();
             var result = new HashSet<int>();
             if (ids.Count == 0) return result;
-            foreach (var r in Db.Rows(
+            // Purchase Request lines and (when set up) Inventory Transfer Request lines together: Completed only when
+            // every linked line of either kind is Closed
+            string sql =
                 "Select M.\"U_PdoEntry\" as \"Pdo\", Count(*) as \"Lines\", " +
                 "Sum(Case When P1.\"LineStatus\" = 'C' Then 1 Else 0 End) as \"Closed\" " +
                 "from " + MapTable + " M " +
                 "Inner Join PRQ1 P1 on P1.\"DocEntry\" = M.\"U_PrEntry\" and P1.\"LineNum\" = M.\"U_PrLine\" " +
                 "Inner Join OPRQ P0 on P0.\"DocEntry\" = P1.\"DocEntry\" " +
                 "Where M.\"U_PdoEntry\" in (" + InList(ids) + ") and P0.\"CANCELED\" = 'N' " +
-                "Group by M.\"U_PdoEntry\""))
+                "Group by M.\"U_PdoEntry\"";
+            if (HasItrMap)
+                sql += " Union All " +
+                    "Select M.\"U_PdoEntry\" as \"Pdo\", Count(*) as \"Lines\", " +
+                    "Sum(Case When T1.\"LineStatus\" = 'C' Then 1 Else 0 End) as \"Closed\" " +
+                    "from " + ItrMapTable + " M " +
+                    "Inner Join WTQ1 T1 on T1.\"DocEntry\" = M.\"U_ItrEntry\" and T1.\"LineNum\" = M.\"U_ItrLine\" " +
+                    "Inner Join OWTQ T0 on T0.\"DocEntry\" = T1.\"DocEntry\" " +
+                    "Where M.\"U_PdoEntry\" in (" + InList(ids) + ") and T0.\"CANCELED\" = 'N' " +
+                    "Group by M.\"U_PdoEntry\"";
+            foreach (var g in Db.Rows(sql).GroupBy(r => Int(r, "Pdo")))
             {
-                int lines = Int(r, "Lines");
-                if (lines > 0 && Int(r, "Closed") == lines) result.Add(Int(r, "Pdo"));
+                int lines = g.Sum(r => Int(r, "Lines"));
+                if (lines > 0 && g.Sum(r => Int(r, "Closed")) == lines) result.Add(g.Key);
             }
             return result;
         }
@@ -458,6 +470,7 @@ namespace EBHMaterialPlanning
             var ids = pdoEntries.Distinct().ToList();
             if (ids.Count == 0) return;
             ExecSyncMapStatus(" Where \"U_PdoEntry\" in (" + InList(ids) + ")");
+            SyncItrMapStatus(" Where \"U_PdoEntry\" in (" + InList(ids) + ")");
         }
 
         /// <summary>SyncMapStatus for every row in the table at once - run when Material Request Planning opens (see
@@ -476,6 +489,10 @@ namespace EBHMaterialPlanning
                 "Where M.\"U_PrStatus\" <> (Case When P0.\"CANCELED\" = 'Y' Then 'X' Else P0.\"DocStatus\" End)")
                 .Count > 0;
             if (stale) ExecSyncMapStatus("");
+            if (HasItrMap && Db.Rows(
+                "Select Top 1 M.\"Code\" from " + ItrMapTable + " M Inner Join OWTQ T0 on T0.\"DocEntry\" = M.\"U_ItrEntry\" " +
+                "Where M.\"U_ItrStatus\" <> (Case When T0.\"CANCELED\" = 'Y' Then 'X' Else T0.\"DocStatus\" End)").Count > 0)
+                SyncItrMapStatus("");
         }
 
         private void ExecSyncMapStatus(string where)
@@ -515,7 +532,66 @@ namespace EBHMaterialPlanning
                 "Where P0.\"CANCELED\" = 'N' and M.\"U_PdoEntry\" in (" + InList(ids) + ") " +
                 "Group by M.\"U_PdoEntry\", M.\"U_PdoLine\""))
                 result[Int(r, "Pdo") + ":" + Int(r, "Line")] = Dec(r, "Share");
+            if (!HasItrMap) return result;
+            // Inventory Transfer Request lines count the same way: still open on the request + already transferred
+            // (Inventory Transfers drawn from it), capped at the line quantity, x the component's share of the line
+            string itrCovered =
+                "(Case When T1.\"LineStatus\" = 'O' and T0.\"DocStatus\" = 'O' Then T1.\"OpenQty\" Else 0 End + IsNull(TR.\"Moved\", 0))";
+            foreach (var r in Db.Rows(
+                "Select M.\"U_PdoEntry\" as \"Pdo\", M.\"U_PdoLine\" as \"Line\", " +
+                "Sum(M.\"U_Qty\" * ((Case When " + itrCovered + " > T1.\"Quantity\" Then T1.\"Quantity\" Else " + itrCovered + " End) / NullIf(T1.\"Quantity\", 0))) as \"Share\" " +
+                "from " + ItrMapTable + " M " +
+                "Inner Join WTQ1 T1 on T1.\"DocEntry\" = M.\"U_ItrEntry\" and T1.\"LineNum\" = M.\"U_ItrLine\" " +
+                "Inner Join OWTQ T0 on T0.\"DocEntry\" = T1.\"DocEntry\" " +
+                "Left Join (Select Q.\"BaseEntry\", Q.\"BaseLine\", Sum(Q.\"Quantity\") as \"Moved\" from WTR1 Q " +
+                "Inner Join OWTR O on O.\"DocEntry\" = Q.\"DocEntry\" " +
+                "Where Q.\"BaseType\" = " + ObjInventoryTransferRequest + " and O.\"CANCELED\" = 'N' Group by Q.\"BaseEntry\", Q.\"BaseLine\") TR " +
+                "on TR.\"BaseEntry\" = T1.\"DocEntry\" and TR.\"BaseLine\" = T1.\"LineNum\" " +
+                "Where T0.\"CANCELED\" = 'N' and M.\"U_PdoEntry\" in (" + InList(ids) + ") " +
+                "Group by M.\"U_PdoEntry\", M.\"U_PdoLine\""))
+            {
+                string key = Int(r, "Pdo") + ":" + Int(r, "Line");
+                decimal had;
+                result.TryGetValue(key, out had);
+                result[key] = had + Dec(r, "Share");
+            }
             return result;
+        }
+        #endregion
+
+        #region Inventory Transfer Request component map (@EBH_ITRMAP)
+        /// <summary>Same idea as @EBH_PRQMAP, for the Inventory Transfer Request lines Material Request Planning raises
+        /// (ITRQTY): one row per Production Order component each ITR line covers, with that component's quantity.</summary>
+        private const string ItrMapTable = "\"@EBH_ITRMAP\"";
+
+        private bool hasItrMap;
+        /// <summary>True once Database Setup has created @EBH_ITRMAP (checked until it exists, then remembered), so
+        /// every lookup keeps working on a company where the setup has not been run again yet.</summary>
+        private bool HasItrMap
+        {
+            get
+            {
+                if (!hasItrMap) hasItrMap = UdfExists("EBH_ITRMAP", "ItrStatus");
+                return hasItrMap;
+            }
+        }
+
+        private static void InsertItrMapRow(int itrEntry, int itrLine, int pdoEntry, int pdoLine, decimal qty)
+        {
+            string code = Guid.NewGuid().ToString("N");
+            Db.Exec("Insert into " + ItrMapTable + " (\"Code\",\"Name\",\"U_ItrEntry\",\"U_ItrLine\",\"U_PdoEntry\",\"U_PdoLine\",\"U_Qty\",\"U_ItrStatus\") Values (" +
+                Db.Quote(code) + "," + Db.Quote(code) + "," + itrEntry + "," + itrLine + "," + pdoEntry + "," + pdoLine + "," + qty.ToString(Inv) + "," + Db.Quote("O") + ")");
+        }
+
+        /// <summary>Refreshes U_ItrStatus ('O' / 'C' / 'X' cancelled) from the live ITR document, for the given
+        /// Production Orders ("" = every row). Reference only - lookups read the live status through the join.</summary>
+        private void SyncItrMapStatus(string where)
+        {
+            if (!HasItrMap) return;
+            Db.Exec(
+                "Update " + ItrMapTable + " Set \"U_ItrStatus\" = " +
+                "(Select Case When T0.\"CANCELED\" = 'Y' Then 'X' Else T0.\"DocStatus\" End from OWTQ T0 " +
+                "Where T0.\"DocEntry\" = " + ItrMapTable + ".\"U_ItrEntry\")" + where);
         }
         #endregion
 
@@ -525,14 +601,47 @@ namespace EBHMaterialPlanning
         {
             var ids = pdoEntries.Distinct().ToList();
             if (ids.Count == 0) return new List<int>();
-            return Db.Rows("Select Distinct M.\"U_PdoEntry\" as \"Pdo\" from " + MapTable + " M Where M.\"U_PdoEntry\" in (" + InList(ids) + ")")
-                .Select(r => Int(r, "Pdo")).ToList();
+            string sql = "Select Distinct M.\"U_PdoEntry\" as \"Pdo\" from " + MapTable + " M Where M.\"U_PdoEntry\" in (" + InList(ids) + ")";
+            if (HasItrMap) sql += " Union Select Distinct M.\"U_PdoEntry\" as \"Pdo\" from " + ItrMapTable + " M Where M.\"U_PdoEntry\" in (" + InList(ids) + ")";
+            return Db.Rows(sql).Select(r => Int(r, "Pdo")).Distinct().ToList();
         }
 
         /// <summary>Purchase Request lines raised from a Production Order, with the request status - including a
         /// line merged from this component and others, reported with this component's own share of quantity, not
         /// the whole merged line's.</summary>
         public List<LinkedRequest> LinkedRequests(int pdoEntry)
+        {
+            List<LinkedRequest> list = LinkedPurchaseRequests(pdoEntry);
+            if (HasItrMap) list.AddRange(LinkedTransferRequests(pdoEntry));
+            return list;
+        }
+
+        /// <summary>Inventory Transfer Request lines raised from a Production Order (DocType "ITR"), this component's own share.</summary>
+        private List<LinkedRequest> LinkedTransferRequests(int pdoEntry)
+        {
+            return Db.Rows(
+                "Select T0.\"DocEntry\", T0.\"DocNum\", T0.\"Series\", N1.\"SeriesName\", T0.\"DocDate\", T0.\"DocStatus\", T0.\"CANCELED\", " +
+                "T1.\"LineNum\" as \"ItrLine\", T1.\"LineStatus\", T1.\"ItemCode\", T1.\"Dscription\", T1.\"Quantity\", T1.\"OpenQty\", " +
+                "M.\"U_PdoLine\" as \"PdoLine\", M.\"U_Qty\" as \"MemberQty\" " +
+                "from " + ItrMapTable + " M " +
+                "Inner Join WTQ1 T1 on T1.\"DocEntry\" = M.\"U_ItrEntry\" and T1.\"LineNum\" = M.\"U_ItrLine\" " +
+                "Inner Join OWTQ T0 on T0.\"DocEntry\" = T1.\"DocEntry\" " +
+                "Left Join NNM1 N1 on N1.\"Series\" = T0.\"Series\" and N1.\"ObjectCode\" = '" + ObjInventoryTransferRequest + "' " +
+                "Where M.\"U_PdoEntry\" = " + pdoEntry + " Order by T0.\"DocNum\", M.\"U_PdoLine\"")
+                .Select(r => new LinkedRequest
+                {
+                    DocType = "ITR",
+                    PrEntry = Int(r, "DocEntry"), PrNum = Int(r, "DocNum"), PrLine = Int(r, "ItrLine"),
+                    Series = Int(r, "Series"), SeriesName = Db.Str(r, "SeriesName"), PostingDate = Date(r, "DocDate"),
+                    Status = Db.Str(r, "CANCELED") == "Y" ? "X" : Db.Str(r, "DocStatus"),
+                    ItemCode = Db.Str(r, "ItemCode"), Description = Db.Str(r, "Dscription"), PdoLine = Int(r, "PdoLine"),
+                    Quantity = Dec(r, "MemberQty"),
+                    OpenQuantity = Db.Str(r, "CANCELED") == "N" && Db.Str(r, "LineStatus") == "O" && Dec(r, "Quantity") > 0
+                        ? Dec(r, "OpenQty") * (Dec(r, "MemberQty") / Dec(r, "Quantity")) : 0
+                }).ToList();
+        }
+
+        private List<LinkedRequest> LinkedPurchaseRequests(int pdoEntry)
         {
             return Db.Rows(
                 "Select P0.\"DocEntry\", P0.\"DocNum\", P0.\"Series\", N1.\"SeriesName\", P0.\"DocDate\", P0.\"DocStatus\", P0.\"CANCELED\", " +
@@ -563,6 +672,11 @@ namespace EBHMaterialPlanning
         public void OpenPurchaseRequest(int docEntry)
         {
             Program.SBO_App.OpenForm((SAPbouiCOM.BoFormObjectEnum)ObjPurchaseRequest, "", docEntry.ToString(Inv));
+        }
+
+        public void OpenTransferRequest(int docEntry)
+        {
+            Program.SBO_App.OpenForm((SAPbouiCOM.BoFormObjectEnum)ObjInventoryTransferRequest, "", docEntry.ToString(Inv));
         }
 
         public void OpenProductionOrder(int docEntry)
@@ -807,7 +921,7 @@ namespace EBHMaterialPlanning
                 oDoc.DocDate = DateTime.Today;
                 oDoc.DocDueDate = ToDate(h.DueDate);
                 if (h.VendorRef.Length > 0) oDoc.NumAtCard = h.VendorRef;
-                SetRemark(oDoc, "Created by EBH Material Request Planning from Purchase Request " + string.Join(", ", rows.Select(r => r.PrNum).Distinct().ToArray()));
+                SetRemark(oDoc.UserFields, "Created by EBH Material Request Planning from Purchase Request " + string.Join(", ", rows.Select(r => r.PrNum).Distinct().ToArray()));
 
                 for (int i = 0; i < rows.Count; i++)
                 {
@@ -847,34 +961,86 @@ namespace EBHMaterialPlanning
         }
         #endregion
 
-        #region Create Purchase Request
+        #region Create Purchase Request / Inventory Transfer Request
         /// <summary>
-        /// Adds one Purchase Request with a row per selected material. The document is added completely or not at all
-        /// (one DI call inside a transaction). Afterwards the Production Order components are refreshed; that part is
-        /// repeatable (Sync), so a failure there is reported as a warning and does not undo the request.
+        /// Adds the Purchase Request (one line per row of <paramref name="prRows"/>, quantity = PRQTY) and/or the
+        /// Inventory Transfer Request (one line per row of <paramref name="itrRows"/>, quantity = ITRQTY) in ONE SAP
+        /// transaction: both are added, or neither. Either list may be empty (Purchase Request or ITR button alone).
+        /// Afterwards the Production Order components are refreshed; that part is repeatable (Sync), so a failure there
+        /// is reported as a warning and does not undo the documents.
         /// </summary>
-        public CreatedRequest CreatePurchaseRequest(PlanHeader h, IList<PlanRow> rows)
+        public CreatedDocuments CreateDocuments(PlanHeader h, IList<PlanRow> prRows, IList<PlanRow> itrRows)
         {
-            // Vendor is optional: a Purchase Request line can be raised with no preferred Vendor at all, and each row
-            // may carry its own anyway (LineVendor). Only check it when one was actually typed / applied.
-            if (h.Vendor.Length > 0 && !VendorExists(h.Vendor)) throw new PlanException(400, "Vendor " + h.Vendor + " is not a valid supplier.", Field("eVend"));
-            // One lookup per distinct row Vendor, not per row
-            foreach (string v in rows.Select(r => r.Vendor).Where(v => v.Length > 0 && !string.Equals(v, h.Vendor, StringComparison.OrdinalIgnoreCase)).Distinct(StringComparer.OrdinalIgnoreCase))
-                if (!VendorExists(v))
-                    throw new PlanException(400, "Vendor " + v + " (row for " + rows.First(r => string.Equals(r.Vendor, v, StringComparison.OrdinalIgnoreCase)).ItemCode + ") is not a valid supplier.", "gRows");
-            if (!WarehouseExists(h.Warehouse)) throw new PlanException(400, "Warehouse " + h.Warehouse + " does not exist.", Field("eWhs"));
+            prRows = prRows ?? new List<PlanRow>();
+            itrRows = itrRows ?? new List<PlanRow>();
+            if (prRows.Count == 0 && itrRows.Count == 0) throw new PlanException(400, "Nothing to create.");
             bool multiBranch = MultiBranch;
-            if (multiBranch && h.Branch <= 0) throw new PlanException(400, "Select the Branch.", Field("cBranch"));
+            if (prRows.Count > 0)
+            {
+                // Vendor is optional: a Purchase Request line can be raised with no preferred Vendor at all, and each row
+                // may carry its own anyway (LineVendor). Only check it when one was actually typed / applied.
+                if (h.Vendor.Length > 0 && !VendorExists(h.Vendor)) throw new PlanException(400, "Vendor " + h.Vendor + " is not a valid supplier.", Field("eVend"));
+                // One lookup per distinct row Vendor, not per row
+                foreach (string v in prRows.Select(r => r.Vendor).Where(v => v.Length > 0 && !string.Equals(v, h.Vendor, StringComparison.OrdinalIgnoreCase)).Distinct(StringComparer.OrdinalIgnoreCase))
+                    if (!VendorExists(v))
+                        throw new PlanException(400, "Vendor " + v + " (row for " + prRows.First(r => string.Equals(r.Vendor, v, StringComparison.OrdinalIgnoreCase)).ItemCode + ") is not a valid supplier.", "gRows");
+                if (!WarehouseExists(h.Warehouse)) throw new PlanException(400, "Warehouse " + h.Warehouse + " does not exist.", Field("eWhs"));
+                if (multiBranch && h.Branch <= 0) throw new PlanException(400, "Select the Branch.", Field("cBranch"));
+            }
+            int itrSeries = 0;
+            if (itrRows.Count > 0)
+            {
+                // The ITR writes WTQ1.U_EBH_PRODUCTIONNO and @EBH_ITRMAP: stop with a clear message, not a raw SAP /
+                // SQL error after the document was already added and rolled back
+                if (!HasItrMap || !UdfExists("WTQ1", "EBH_PRODUCTIONNO"))
+                    throw new PlanException(500, "Inventory Transfer Requests are not set up in this company yet. Run Database Setup (Create All Environment), then restart SAP Business One.");
+                List<string> errors = CheckTransferRows(itrRows, r => r.ItemCode);
+                if (errors.Count > 0) throw new PlanException(400, string.Join(Environment.NewLine, errors.Take(8).ToArray()), "gRows");
+                itrSeries = DefaultSeriesFor(ObjInventoryTransferRequest);
+            }
 
-            SAPbobsCOM.Documents oDoc = null;
+            var result = new CreatedDocuments();
             bool inTransaction = false;
-            var result = new CreatedRequest();
             try
             {
                 if (Company.InTransaction) throw new PlanException(409, "SAP is busy with another transaction. Try again in a moment.");
                 Company.StartTransaction();
                 inTransaction = true;
+                if (prRows.Count > 0) result.Pr = new CreatedRequest { DocEntry = AddPurchaseRequest(h, prRows, multiBranch) };
+                if (itrRows.Count > 0) result.Itr = new CreatedRequest { DocEntry = AddTransferRequest(h, itrRows, itrSeries) };
+                Company.EndTransaction(SAPbobsCOM.BoWfTransOpt.wf_Commit);
+                inTransaction = false;
+            }
+            catch
+            {
+                if (inTransaction && Company.InTransaction) Company.EndTransaction(SAPbobsCOM.BoWfTransOpt.wf_RollBack);
+                throw;
+            }
 
+            if (result.Pr != null) result.Pr.DocNum = Int(Db.FirstRow("Select \"DocNum\" from OPRQ Where \"DocEntry\" = " + result.Pr.DocEntry), "DocNum");
+            if (result.Itr != null) result.Itr.DocNum = Int(Db.FirstRow("Select \"DocNum\" from OWTQ Where \"DocEntry\" = " + result.Itr.DocEntry), "DocNum");
+            var allPdoEntries = Members(prRows).Concat(Members(itrRows)).Select(m => m.PdoEntry).Distinct();
+            try { Sync(allPdoEntries); }
+            catch (Exception ex)
+            {
+                result.Warning = "The document(s) were created, but the Production Order could not be refreshed (" + ex.Message + "). It is refreshed when the Production Order's linked documents are opened.";
+            }
+            return result;
+        }
+
+        /// <summary>The source component rows a grid row stands for: its merged members, or the row itself.</summary>
+        private static IEnumerable<PlanRow> Members(IEnumerable<PlanRow> rows)
+        {
+            return rows.SelectMany(r => r.MergedFrom != null && r.MergedFrom.Count > 0 ? (IEnumerable<PlanRow>)r.MergedFrom : new[] { r });
+        }
+
+        /// <summary>Builds and adds the Purchase Request (quantity = PRQTY) plus its @EBH_PRQMAP rows. Runs inside
+        /// CreateDocuments' transaction; returns the new DocEntry.</summary>
+        private int AddPurchaseRequest(PlanHeader h, IList<PlanRow> rows, bool multiBranch)
+        {
+            SAPbobsCOM.Documents oDoc = null;
+            try
+            {
                 oDoc = (SAPbobsCOM.Documents)Company.GetBusinessObject(SAPbobsCOM.BoObjectTypes.oPurchaseRequest);
                 oDoc.Series = h.Series;
                 // The branch property is declared on IDocuments, not on the Documents interface GetBusinessObject returns
@@ -884,8 +1050,7 @@ namespace EBHMaterialPlanning
                 oDoc.RequriedDate = ToDate(h.RequiredDate);
                 oDoc.ReqType = 12;                                      // requester is a user
                 oDoc.Requester = Company.UserName;
-                var allPdoNums = rows.SelectMany(r => r.MergedFrom != null && r.MergedFrom.Count > 0 ? r.MergedFrom.Select(m => m.PdoNum) : new[] { r.PdoNum }).Distinct();
-                SetRemark(oDoc, "Created by EBH Material Request Planning from Production Order " + string.Join(", ", allPdoNums.ToArray()));
+                SetRemark(oDoc.UserFields, "Created by EBH Material Request Planning from Production Order " + string.Join(", ", Members(rows).Select(m => m.PdoNum).Distinct().ToArray()));
                 // Vendor and Warehouse are not kept on the header (OPRQ.U_EBH_Vendor / U_EBH_Whse): each line carries its own (LineVendor / WarehouseCode), read back for Purchase Order Planning.
                 // Header Project (OPRQ.Project): the rows all share one Project, enforced when they were picked on the form
                 string headerProject = rows.Select(r => r.Project).FirstOrDefault(p => p.Length > 0) ?? "";
@@ -897,7 +1062,7 @@ namespace EBHMaterialPlanning
                     if (i > 0) oDoc.Lines.Add();
                     oDoc.Lines.SetCurrentLine(i);
                     oDoc.Lines.ItemCode = r.ItemCode;
-                    oDoc.Lines.Quantity = (double)r.Quantity;
+                    oDoc.Lines.Quantity = (double)r.PrQuantity;
                     oDoc.Lines.WarehouseCode = r.Warehouse;
                     oDoc.Lines.LineVendor = r.Vendor;
                     // Project is declared on IDocument_Lines, not on the Document_Lines interface Lines returns
@@ -907,12 +1072,11 @@ namespace EBHMaterialPlanning
                     // Line Total of the request line are deliberately left blank (UnitPrice / DiscountPercent never set)
                     oDoc.Lines.UserFields.Fields.Item(FieldPafd).Value = (double)r.PriceAfterDiscount;
                     oDoc.Lines.UserFields.Fields.Item(FieldLineTotal).Value = (double)r.Total;
-                    var members = r.MergedFrom != null && r.MergedFrom.Count > 0 ? r.MergedFrom : new List<PlanRow> { r };
+                    var members = Members(new[] { r }).ToList();
                     oDoc.Lines.UserFields.Fields.Item(FieldPdo).Value = r.PdoEntry.ToString(Inv);
                     // Comma-separated line number(s) of the members that belong to the SAME order as EBH_PRODUCTIONNO
-                    // above (one number for an ordinary, non-merged row). A member from a different order cannot be
-                    // named here without its own order, which this plain line-number list has no room for - it is
-                    // still fully tracked in @EBH_PRQMAP below, never relied on through this field.
+                    // above (one number for an ordinary, non-merged row). A member from a different order is still
+                    // fully tracked in @EBH_PRQMAP below, never relied on through this field.
                     string sameOrderLines = string.Join(",", members.Where(m => m.PdoEntry == r.PdoEntry).Select(m => m.PdoLine).Distinct().OrderBy(l => l).Select(l => l.ToString(Inv)).ToArray());
                     oDoc.Lines.UserFields.Fields.Item(FieldPdoLine).Value = sameOrderLines;
                     oDoc.Lines.UserFields.Fields.Item("U_EBH_ValidTill").Value = ToDate(r.ValidUntil);
@@ -920,32 +1084,119 @@ namespace EBHMaterialPlanning
                     if (r.TracksJobCode && r.PdoItemCode.Length > 0) oDoc.Lines.UserFields.Fields.Item("U_EBH_JOBCODNO").Value = r.PdoItemCode;
                 }
                 Check(oDoc.Add(), "Purchase Request was not created");
-                result.DocEntry = int.Parse(Company.GetNewObjectKey(), Inv);
-                // @EBH_PRQMAP: one row per component every line actually covers - the real, unlimited record every
-                // "already requested" / progress / Linked Documents lookup reads. Written inside the same
-                // transaction as the document itself, so a rollback above undoes these rows too.
+                int docEntry = int.Parse(Company.GetNewObjectKey(), Inv);
+                // @EBH_PRQMAP: one row per component every line actually covers, with that component's own PRQTY -
+                // written inside the same transaction as the document, so a rollback undoes these rows too.
+                for (int i = 0; i < rows.Count; i++)
+                    foreach (PlanRow m in Members(new[] { rows[i] }).Where(m => m.PrQuantity > 0))
+                        InsertMapRow(docEntry, i, m.PdoEntry, m.PdoLine, m.PrQuantity);
+                return docEntry;
+            }
+            finally { Release(oDoc); }
+        }
+
+        /// <summary>
+        /// Builds and adds the Inventory Transfer Request (object 1250000001): one line per row, quantity = ITRQTY,
+        /// from the row's From Warehouse to the row's Warehouse (the same warehouse is allowed, as in SAP). Writes the
+        /// @EBH_ITRMAP rows. Runs inside CreateDocuments' transaction; returns the new DocEntry.
+        /// </summary>
+        private int AddTransferRequest(PlanHeader h, IList<PlanRow> rows, int series)
+        {
+            SAPbobsCOM.StockTransfer oTr = null;
+            try
+            {
+                oTr = (SAPbobsCOM.StockTransfer)Company.GetBusinessObject(SAPbobsCOM.BoObjectTypes.oInventoryTransferRequest);
+                if (series > 0) oTr.Series = series;
+                oTr.DocDate = DateTime.Today;
+                oTr.DueDate = h.RequiredDate.Length > 0 ? ToDate(h.RequiredDate) : DateTime.Today;
+                oTr.FromWarehouse = rows[0].FromWarehouse;
+                oTr.ToWarehouse = rows[0].Warehouse;
+                SetRemark(oTr.UserFields, "Created by EBH Material Request Planning from Production Order " + string.Join(", ", Members(rows).Select(m => m.PdoNum).Distinct().ToArray()));
+
                 for (int i = 0; i < rows.Count; i++)
                 {
                     PlanRow r = rows[i];
-                    var members = r.MergedFrom != null && r.MergedFrom.Count > 0 ? r.MergedFrom : new List<PlanRow> { r };
-                    foreach (PlanRow m in members) InsertMapRow(result.DocEntry, i, m.PdoEntry, m.PdoLine, m.Quantity);
+                    if (i > 0) oTr.Lines.Add();
+                    oTr.Lines.SetCurrentLine(i);
+                    oTr.Lines.ItemCode = r.ItemCode;
+                    oTr.Lines.Quantity = (double)r.ItrQuantity;
+                    oTr.Lines.FromWarehouseCode = r.FromWarehouse;
+                    oTr.Lines.WarehouseCode = r.Warehouse;
+                    if (r.Project.Length > 0) oTr.Lines.ProjectCode = r.Project;
+                    oTr.Lines.UserFields.Fields.Item(FieldPdo).Value = r.PdoEntry.ToString(Inv);
                 }
-                Company.EndTransaction(SAPbobsCOM.BoWfTransOpt.wf_Commit);
-                inTransaction = false;
+                Check(oTr.Add(), "Inventory Transfer Request was not created");
+                int docEntry = int.Parse(Company.GetNewObjectKey(), Inv);
+                for (int i = 0; i < rows.Count; i++)
+                    foreach (PlanRow m in Members(new[] { rows[i] }).Where(m => m.ItrQuantity > 0))
+                        InsertItrMapRow(docEntry, i, m.PdoEntry, m.PdoLine, m.ItrQuantity);
+                return docEntry;
             }
-            catch
-            {
-                if (inTransaction && Company.InTransaction) Company.EndTransaction(SAPbobsCOM.BoWfTransOpt.wf_RollBack);
-                throw;
-            }
-            finally { Release(oDoc); }
+            finally { Release(oTr); }
+        }
 
-            result.DocNum = Int(Db.FirstRow("Select \"DocNum\" from OPRQ Where \"DocEntry\" = " + result.DocEntry), "DocNum");
-            var allPdoEntries = rows.SelectMany(r => r.MergedFrom != null && r.MergedFrom.Count > 0 ? r.MergedFrom.Select(m => m.PdoEntry) : new[] { r.PdoEntry }).Distinct();
-            try { Sync(allPdoEntries); }
-            catch (Exception ex)
+        /// <summary>
+        /// SAP's own Inventory Transfer Request rules, checked up front so the user gets every problem named at once
+        /// (rows with ITRQTY &gt; 0). <paramref name="label"/> names a row in the messages. Empty list = all good.
+        /// From Warehouse and Warehouse may be the same, as SAP's own Inventory Transfer Request allows.
+        /// </summary>
+        public List<string> CheckTransferRows(IList<PlanRow> rows, Func<PlanRow, string> label)
+        {
+            var errors = new List<string>();
+            var whsCodes = rows.SelectMany(r => new[] { r.FromWarehouse, r.Warehouse }).Where(w => w.Length > 0).Distinct().ToList();
+            // WhsCode -> Inactive
+            var whs = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            if (whsCodes.Count > 0)
+                foreach (var w in Db.Rows("Select \"WhsCode\", \"Inactive\" from OWHS Where \"WhsCode\" in (" + InList(whsCodes) + ")"))
+                    whs[Db.Str(w, "WhsCode")] = Db.Str(w, "Inactive");
+            // ItemCode -> [InvntItem, ManBtchNum, ManSerNum, frozenFor]
+            var items = new Dictionary<string, string[]>(StringComparer.OrdinalIgnoreCase);
+            var itemCodes = rows.Select(r => r.ItemCode).Where(c => c.Length > 0).Distinct().ToList();
+            if (itemCodes.Count > 0)
+                foreach (var it in Db.Rows("Select \"ItemCode\", \"InvntItem\", \"ManBtchNum\", \"ManSerNum\", \"frozenFor\" from OITM Where \"ItemCode\" in (" + InList(itemCodes) + ")"))
+                    items[Db.Str(it, "ItemCode")] = new[] { Db.Str(it, "InvntItem"), Db.Str(it, "ManBtchNum"), Db.Str(it, "ManSerNum"), Db.Str(it, "frozenFor") };
+
+            foreach (PlanRow r in rows)
             {
-                result.Warning = "Purchase Request " + result.DocNum + " was created, but the Production Order could not be refreshed (" + ex.Message + "). It is refreshed when the Production Order's Purchase Requests are opened.";
+                string at = label(r);
+                string[] it;
+                if (!items.TryGetValue(r.ItemCode, out it)) { errors.Add(at + ": item not found."); continue; }
+                if (it[0] != "Y") errors.Add(at + ": " + r.ItemCode + " is not an inventory item, so it cannot be transferred.");
+                if (it[3] == "Y") errors.Add(at + ": " + r.ItemCode + " is inactive.");
+                if (it[1] == "Y" || it[2] == "Y") errors.Add(at + ": " + (it[1] == "Y" ? "batch" : "serial") + "-managed items cannot be put on an Inventory Transfer Request from here.");
+
+                string inactive;
+                if (r.FromWarehouse.Length == 0) errors.Add(at + ": From Warehouse is missing.");
+                else if (!whs.TryGetValue(r.FromWarehouse, out inactive)) errors.Add(at + ": From Warehouse " + r.FromWarehouse + " does not exist.");
+                else if (inactive == "Y") errors.Add(at + ": From Warehouse " + r.FromWarehouse + " is inactive.");
+                if (r.Warehouse.Length == 0) errors.Add(at + ": Warehouse (To Warehouse) is missing.");
+                else if (!whs.TryGetValue(r.Warehouse, out inactive)) errors.Add(at + ": Warehouse " + r.Warehouse + " does not exist.");
+                else if (inactive == "Y") errors.Add(at + ": Warehouse " + r.Warehouse + " is inactive.");
+            }
+            return errors;
+        }
+
+        /// <summary>
+        /// Rows whose ITRQTY is more than what is available in their From Warehouse (OITW.OnHand - IsCommited). SAP
+        /// still accepts the request - only the actual transfer is blocked - so this is a warning to confirm, not an error.
+        /// </summary>
+        public List<string> TransferStockShortfalls(IList<PlanRow> rows, Func<PlanRow, string> label)
+        {
+            var result = new List<string>();
+            var items = rows.Select(r => r.ItemCode).Distinct().ToList();
+            if (items.Count == 0) return result;
+            var whs = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
+            foreach (var w in Db.Rows("Select \"ItemCode\", \"WhsCode\", \"OnHand\" - \"IsCommited\" as \"Avail\" from OITW Where \"ItemCode\" in (" + InList(items) + ")"))
+                whs[Db.Str(w, "ItemCode") + "|" + Db.Str(w, "WhsCode")] = Dec(w, "Avail");
+            // Several rows can draw the same item from the same warehouse: compare their total
+            foreach (var g in rows.GroupBy(r => r.ItemCode + "|" + r.FromWarehouse, StringComparer.OrdinalIgnoreCase))
+            {
+                decimal want = g.Sum(r => r.ItrQuantity), have;
+                PlanRow first = g.First();
+                whs.TryGetValue(g.Key, out have);
+                if (want > have)
+                    result.Add(label(first) + ": ITRQTY " + want.ToString("0.######", Inv) + " is more than the " + have.ToString("0.######", Inv) +
+                        " available in warehouse " + first.FromWarehouse + ".");
             }
             return result;
         }

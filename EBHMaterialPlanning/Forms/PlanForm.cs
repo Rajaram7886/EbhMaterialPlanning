@@ -753,6 +753,11 @@ namespace EBHMaterialPlanning
         private readonly List<int> colors = new List<int>();
         private readonly Dictionary<string, string> titles = new Dictionary<string, string>();
         private readonly HashSet<string> sortable = new HashSet<string>();
+        private readonly List<string> editableCols = new List<string>();
+        private bool whiteEditable;
+        // Values each combo column offers. A DataTable value missing from them makes SAP refuse the Fill with
+        // "Form - Bad Value", so Fill adds any missing one first.
+        private readonly Dictionary<string, HashSet<string>> choices = new Dictionary<string, HashSet<string>>();
         private static readonly CultureInfo Inv = CultureInfo.InvariantCulture;
         /// <summary>Row of the DataTable the user clicked last (-1 = none).</summary>
         public int Current = -1;
@@ -761,6 +766,7 @@ namespace EBHMaterialPlanning
         public static readonly int Red = Rgb(255, 205, 205), Yellow = Rgb(255, 248, 196), Green = Rgb(214, 240, 214), Grey = Rgb(232, 232, 232), Blue = Rgb(214, 230, 247);
         // Named palette for Production Order completion progress (#D1FAE5 / #FEF3C7 / #E5E7EB), linked-document
         // highlighting (#DBEAFE) and the Materials grid's default row tint (#F3E8FF)
+        public static readonly int White = Rgb(255, 255, 255);
         public static readonly int MintGreen = Rgb(0xD1, 0xFA, 0xE5), PastelYellow = Rgb(0xFE, 0xF3, 0xC7), CoolGray = Rgb(0xE5, 0xE7, 0xEB), SkyBlue = Rgb(0xDB, 0xEA, 0xFE), Lavender = Rgb(0xF3, 0xE8, 0xFF);
         internal static int Rgb(int r, int g, int b) { return r | (g << 8) | (b << 16); }
 
@@ -775,6 +781,7 @@ namespace EBHMaterialPlanning
             Table.Columns.Add(uid, type, type == SAPbouiCOM.BoFieldsType.ft_AlphaNumeric ? 254 : 0);
             cols.Add(uid);
             titles[uid] = title;
+            if (editable) editableCols.Add(uid);
             setup.Add(() =>
             {
                 SAPbouiCOM.GridColumn c = Grid.Columns.Item(uid);
@@ -788,10 +795,12 @@ namespace EBHMaterialPlanning
         /// <summary>Turns a text column into a combo box column.</summary>
         public GridTable ComboColumn(string uid)
         {
+            choices[uid] = new HashSet<string>();
             setup.Add(() =>
             {
                 Grid.Columns.Item(uid).Type = SAPbouiCOM.BoGridColumnType.gct_ComboBox;
                 ((SAPbouiCOM.ComboBoxColumn)Grid.Columns.Item(uid)).DisplayType = SAPbouiCOM.BoComboDisplayType.cdt_Value;
+                AddChoice(uid, "", "");      // an empty cell is a valid value too
             });
             return this;
         }
@@ -858,6 +867,14 @@ namespace EBHMaterialPlanning
                 : rows.OrderByDescending(r => key(col, r) ?? "", StringComparer.CurrentCultureIgnoreCase)).ToList();
         }
 
+        /// <summary>Editable cells keep a white background whatever colour their row gets, so the fields the user
+        /// can type into stand out from the tinted, read-only ones.</summary>
+        public GridTable WhiteEditable()
+        {
+            whiteEditable = true;
+            return this;
+        }
+
         /// <summary>Several rows can be selected with Ctrl / Shift (the Production Orders list).</summary>
         public GridTable MultiSelect()
         {
@@ -915,6 +932,8 @@ namespace EBHMaterialPlanning
 
         public void AddChoice(string uid, string value, string description)
         {
+            HashSet<string> known;
+            if (choices.TryGetValue(uid, out known) && !known.Add(value)) return;     // SAP refuses a duplicate value
             ((SAPbouiCOM.ComboBoxColumn)Grid.Columns.Item(uid)).ValidValues.Add(value, description);
         }
 
@@ -950,6 +969,8 @@ namespace EBHMaterialPlanning
                 {
                     string key = Key(rows[r][c]);
                     if (cache[r][c] == key) continue;
+                    HashSet<string> known;
+                    if (choices.TryGetValue(cols[c], out known) && !known.Contains(key)) AddChoice(cols[c], key, key);
                     Table.SetValue(cols[c], r, Native(rows[r][c]));
                     cache[r][c] = key;
                 }
@@ -986,6 +1007,11 @@ namespace EBHMaterialPlanning
             try
             {
                 Grid.CommonSetting.SetRowBackColor(row + 1, color);
+                // The row colour repaints every cell, so the editable ones are whitened again after it. Column by
+                // position, as in Lock().
+                if (whiteEditable)
+                    foreach (string uid in editableCols)
+                        Grid.CommonSetting.SetCellBackColor(row + 1, cols.IndexOf(uid), White);
                 colors[row] = color;
             }
             catch (System.Runtime.InteropServices.COMException ex) { System.Diagnostics.Trace.WriteLine("EBH Material Planning row colour : " + ex.Message); }

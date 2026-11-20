@@ -52,7 +52,7 @@ namespace EBHMaterialPlanning
                 {
                     PdoEntry = c.PdoEntry, PdoNum = c.PdoNum, PdoLine = c.PdoLine, Project = c.Project,
                     ItemCode = c.ItemCode, Description = c.Description, Uom = c.Uom,
-                    Quantity = c.Balance, Balance = c.Balance, AlreadyRequested = c.OpenRequested, Warehouse = c.Warehouse,
+                    Quantity = c.Balance, PrQuantity = c.Balance, ItrQuantity = 0, Balance = c.Balance, AlreadyRequested = c.OpenRequested, Warehouse = c.Warehouse,
                     Manufacturer = c.Manufacturer, ManufacturerName = c.ManufacturerName, HasLinkedRequest = linked.Contains(c.PdoEntry),
                     Price = c.Price, Discount = c.Discount, PriceAfterDiscount = c.PriceAfterDiscount, Catalog = c.Catalog, TracksJobCode = c.TracksJobCode, PdoItemCode = c.PdoItemCode,
                     RequiredDate = today, ValidUntil = inAMonth
@@ -76,52 +76,115 @@ namespace EBHMaterialPlanning
         #endregion
 
         #region Checks
+        /// <summary>Which document(s) a Create press makes: the Purchase Request button, the Inventory Transfer
+        /// Request button, or Combine (both, in one SAP transaction).</summary>
+        public enum CreateKind { PurchaseRequest, TransferRequest, Both }
+
+        private static bool MakesPr(CreateKind k) { return k != CreateKind.TransferRequest; }
+        private static bool MakesItr(CreateKind k) { return k != CreateKind.PurchaseRequest; }
+
+        private static string RowName(PlanRow r, int no)
+        {
+            return "Row " + no + " (" + r.ItemCode + ", Production Order " + r.PdoNum + ")";
+        }
+
+        /// <summary>Selected rows that go onto the Purchase Request (PRQTY &gt; 0) for this press.</summary>
+        public static List<PlanRow> PrRows(IList<PlanRow> rows, CreateKind kind)
+        {
+            return MakesPr(kind) ? rows.Where(r => r.Selected && r.PrQuantity > 0).ToList() : new List<PlanRow>();
+        }
+
+        /// <summary>Selected rows that go onto the Inventory Transfer Request (ITRQTY &gt; 0) for this press.</summary>
+        public static List<PlanRow> ItrRows(IList<PlanRow> rows, CreateKind kind)
+        {
+            return MakesItr(kind) ? rows.Where(r => r.Selected && r.ItrQuantity > 0).ToList() : new List<PlanRow>();
+        }
+
         /// <summary>
-        /// The basic checks before creation. Throws a PlanException that names the field or row to correct.
-        /// Row numbers are the numbers the user sees (1 = first row of the grid).
+        /// The checks before creation. Throws a PlanException that names the field or row to correct. Row numbers
+        /// are the numbers the user sees (1 = first row of the grid).
+        /// Every selected row: PRQTY and ITRQTY not negative, not both 0, PRQTY + ITRQTY &lt;= Quantity.
+        /// Purchase Request rows (PRQTY &gt; 0): warehouse, dates, price. Inventory Transfer Request rows (ITRQTY &gt; 0):
+        /// SAP's own transfer rules (PlanStore.CheckTransferRows).
         /// </summary>
-        public static void Validate(PlanHeader h, IList<PlanRow> rows)
+        public static void Validate(PlanHeader h, IList<PlanRow> rows, CreateKind kind)
         {
             var errors = new List<Dictionary<string, string>>();
             Action<string, string> fail = (field, message) => errors.Add(new Dictionary<string, string> { { "field", field }, { "message", message } });
 
-            if (h.Series <= 0) fail("cSeries", "Select the Target Document Series.");
-            if (Store.MultiBranch && h.Branch <= 0) fail("cBranch", "Select the Branch.");
-            if (h.RequiredDate.Length == 0) fail("eReq", "Enter the Required Date.");
-            if (h.ValidUntil.Length == 0) fail("eValid", "Enter the Valid Until Date.");
-            if (h.Warehouse.Length == 0) fail("eWhs", "Select the Warehouse.");
-
             var picked = rows.Select((r, i) => new { Row = r, No = i + 1 }).Where(x => x.Row.Selected).ToList();
             if (picked.Count == 0) fail("gRows", "Select at least one material row.");
+
+            bool pr = MakesPr(kind) && picked.Any(x => x.Row.PrQuantity > 0);
+            bool itr = MakesItr(kind) && picked.Any(x => x.Row.ItrQuantity > 0);
+            if (picked.Count > 0)
+            {
+                if (kind == CreateKind.PurchaseRequest && !pr) fail("gRows", "No selected row has a PRQTY - nothing to put on a Purchase Request.");
+                if (kind == CreateKind.TransferRequest && !itr) fail("gRows", "No selected row has an ITRQTY - nothing to put on an Inventory Transfer Request.");
+                if (kind == CreateKind.Both && !pr && !itr) fail("gRows", "No selected row has a PRQTY or an ITRQTY.");
+            }
+
+            if (h.RequiredDate.Length == 0) fail("eReq", "Enter the Required Date.");
+            if (pr)
+            {
+                if (h.Series <= 0) fail("cSeries", "Select the Target Document Series.");
+                if (Store.MultiBranch && h.Branch <= 0) fail("cBranch", "Select the Branch.");
+                if (h.ValidUntil.Length == 0) fail("eValid", "Enter the Valid Until Date.");
+                if (h.Warehouse.Length == 0) fail("eWhs", "Select the Warehouse.");
+            }
+
             foreach (var x in picked)
             {
                 PlanRow r = x.Row;
-                string at = "Row " + x.No + " (" + r.ItemCode + ", Production Order " + r.PdoNum + ")";
+                string at = RowName(r, x.No);
                 if (r.PdoEntry <= 0 || r.ItemCode.Length == 0) fail("gRows", at + " has no source Production Order.");
-                if (r.Quantity <= 0) fail("gRows", at + ": quantity must be more than 0.");
-                else if (r.Quantity > r.Balance) fail("gRows", at + ": quantity " + r.Quantity.ToString("0.######") + " is more than the " + r.Balance.ToString("0.######") + " still to be requested.");
-                if (r.Price < 0) fail("gRows", at + ": price cannot be negative.");
-                if (r.Discount < 0 || r.Discount > 100) fail("gRows", at + ": discount must be between 0 and 100.");
-                if (r.Warehouse.Length == 0) fail("gRows", at + ": warehouse is missing.");
-                if (r.RequiredDate.Length == 0) fail("gRows", at + ": required date is missing.");
-                if (r.ValidUntil.Length == 0) fail("gRows", at + ": valid until date is missing.");
+                if (r.PrQuantity < 0) fail("gRows", at + ": PRQTY cannot be negative.");
+                if (r.ItrQuantity < 0) fail("gRows", at + ": ITRQTY cannot be negative.");
+                if (r.PrQuantity == 0 && r.ItrQuantity == 0) fail("gRows", at + ": enter a PRQTY or an ITRQTY (both are 0).");
+                else if (r.PrQuantity + r.ItrQuantity > r.Quantity)
+                    fail("gRows", at + ": PRQTY " + Qty(r.PrQuantity) + " + ITRQTY " + Qty(r.ItrQuantity) + " is more than the Quantity " + Qty(r.Quantity) + ".");
+                if (MakesPr(kind) && r.PrQuantity > 0)
+                {
+                    if (r.Price < 0) fail("gRows", at + ": price cannot be negative.");
+                    if (r.Discount < 0 || r.Discount > 100) fail("gRows", at + ": discount must be between 0 and 100.");
+                    if (r.Warehouse.Length == 0) fail("gRows", at + ": warehouse is missing.");
+                    if (r.RequiredDate.Length == 0) fail("gRows", at + ": required date is missing.");
+                    if (r.ValidUntil.Length == 0) fail("gRows", at + ": valid until date is missing.");
+                }
+            }
+            if (itr && errors.Count == 0)
+            {
+                var numbers = picked.ToDictionary(x => x.Row, x => x.No);
+                foreach (string e in Store.CheckTransferRows(ItrRows(rows, kind), r => RowName(r, numbers[r]))) fail("gRows", e);
             }
             if (errors.Count > 0)
                 throw new PlanException(400, string.Join(Environment.NewLine, errors.Take(8).Select(e => e["message"]).ToArray()) +
                     (errors.Count > 8 ? Environment.NewLine + "... and " + (errors.Count - 8) + " more." : ""), errors);
 
-            // The same quantity may not be requested twice in one request: rows of one source component add up
+            // The same quantity may not be requested twice in one press: rows of one source component add up
             foreach (var g in picked.GroupBy(x => x.Row.PdoEntry + "/" + x.Row.PdoLine))
-                if (g.Count() > 1 && g.Sum(x => x.Row.Quantity) > g.First().Row.Balance)
+                if (g.Count() > 1 && g.Sum(x => x.Row.PrQuantity + x.Row.ItrQuantity) > g.First().Row.Balance)
                     throw new PlanException(400, "Production Order " + g.First().Row.PdoNum + " line " + g.First().Row.PdoLine + " (" + g.First().Row.ItemCode + ") is on more than one row and the quantities exceed what is still to be requested.");
+        }
+
+        private static string Qty(decimal q) { return q.ToString("0.######", CultureInfo.InvariantCulture); }
+
+        /// <summary>Inventory Transfer Request rows asking for more than is in stock in their From Warehouse
+        /// (a warning to confirm: SAP accepts the request, only the transfer itself is blocked). Empty = none.</summary>
+        public static List<string> TransferWarnings(IList<PlanRow> rows, CreateKind kind)
+        {
+            var itrRows = ItrRows(rows, kind);
+            if (itrRows.Count == 0) return new List<string>();
+            var numbers = rows.Select((r, i) => new { r, No = i + 1 }).ToDictionary(x => x.r, x => x.No);
+            return Store.TransferStockShortfalls(itrRows, r => RowName(r, numbers[r]));
         }
         #endregion
 
-        /// <summary>Validates and creates the Purchase Request for the selected rows.</summary>
-        public static CreatedRequest Create(PlanHeader h, IList<PlanRow> rows)
+        /// <summary>Validates and creates the Purchase Request and/or Inventory Transfer Request for the selected rows.</summary>
+        public static CreatedDocuments Create(PlanHeader h, IList<PlanRow> rows, CreateKind kind)
         {
-            Validate(h, rows);
-            return Store.CreatePurchaseRequest(h, rows.Where(r => r.Selected).ToList());
+            Validate(h, rows, kind);
+            return Store.CreateDocuments(h, PrRows(rows, kind), ItrRows(rows, kind));
         }
 
         #region Purchase Order

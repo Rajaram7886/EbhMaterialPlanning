@@ -23,7 +23,7 @@ namespace EBHMaterialPlanning
         /// <summary>Stock of the loaded items for the In Stock / Project Stock / Main Loc Stock columns, read on Load.</summary>
         private StockMap stock = new StockMap();
         private bool multiBranch;
-        private int lastPrEntry, lastPrNum;
+        private int lastPrEntry, lastPrNum, lastItrEntry;
         private string lastPrProject = "";
 
         public static void Show()
@@ -150,9 +150,14 @@ namespace EBHMaterialPlanning
                 .Column("Catalog", "Catalog No.", width: 90)
                 .Column("Item", "Item No.", width: 100).LinkColumn("Item", "4")
                 .Column("Desc", "Description", width: 180)
-                .Column("Job", "Job Code", width: 90)
+                .Column("Job", "Job Code", width: 140)
                 .Column("Man", "Manufacturer", width: 120)
-                .Column("Qty", "Quantity", SAPbouiCOM.BoFieldsType.ft_Quantity, 70, true)
+                // Quantity is display only (what is still to be planned); PRQTY goes onto the Purchase Request, ITRQTY
+                // onto the Inventory Transfer Request, taken from From Warehouse
+                .Column("Qty", "Quantity", SAPbouiCOM.BoFieldsType.ft_Quantity, 70)
+                .Column("PrQty", "PRQTY", SAPbouiCOM.BoFieldsType.ft_Quantity, 70, true)
+                .Column("ItrQty", "ITRQTY", SAPbouiCOM.BoFieldsType.ft_Quantity, 70, true)
+                .Column("FWhs", "From Warehouse", width: 110, editable: true).ComboColumn("FWhs")
                 .Column("Uom", "UOM", width: 50)
                 .Column("After", "Price After Discount", SAPbouiCOM.BoFieldsType.ft_Price, 100)
                 .Column("Total", "Total", SAPbouiCOM.BoFieldsType.ft_Sum, 90)
@@ -164,20 +169,30 @@ namespace EBHMaterialPlanning
                 .Column("Req", "Required Date", SAPbouiCOM.BoFieldsType.ft_Date, 85, true)
                 .Column("Valid", "Valid Until", SAPbouiCOM.BoFieldsType.ft_Date, 85, true)
                 .Column("Base", "Base Document", width: 90).LinkColumn("Base", "202")
-                .Sortable("Catalog", "Item", "Desc", "Man", "Vend", "Whs", "Req", "Valid")
+                .Sortable("Catalog", "Item", "Desc", "Man", "Vend", "Whs", "FWhs", "Req", "Valid")
+                .WhiteEditable()
                 .Bind();
             SortWith(gRows, ShowRows);
             CflColumn(gRows, "Whs", "64", "WhsCode");
             CflColumn(gRows, "Vend", "2", "CardCode");
+            // From Warehouse is a dropdown of the active warehouses: SAP's warehouse Choose From List opened with no
+            // rows when Tab was pressed in an empty grid cell
+            foreach (var w in Store.Warehouses()) gRows.AddChoice("FWhs", w.Key, w.Value);
 
-            Button("bCreate", "Purchase Request", 8, 574, 150, GridTable.Green);
-            Button("2", "Cancel", 162, 574, 70, GridTable.Grey);
-            Button("bLinked", "Linked Doc.", 236, 574, 120, GridTable.SkyBlue);
-            Button("bLastPr", "", 366, 574, 190, GridTable.Green);
+            // Documents just created: opened from the Materials header row, out of the way of the create buttons
+            Button("bLastPr", "", 320, 348, 170, GridTable.Green);
             Visible("bLastPr", false);
-            Button("bCreatePo", "Create PO", 562, 574, 150, GridTable.Blue);
+            Button("bLastItr", "", 496, 348, 170, GridTable.Green);
+            Visible("bLastItr", false);
+            Button("bCreatePo", "Create PO", 672, 348, 120, GridTable.Blue);
             Visible("bCreatePo", false);
-            Label("lFoot", "", 718, 577, 180);
+
+            Button("bCreate", "Purchase Request", 8, 574, 120, GridTable.Green);
+            Button("bItr", "Inventory Transfer Req.", 132, 574, 140, GridTable.Green);
+            Button("bCombine", "PR + ITR", 276, 574, 100, GridTable.Green);
+            Button("2", "Cancel", 380, 574, 65, GridTable.Grey);
+            Button("bLinked", "Linked Doc.", 449, 574, 90, GridTable.SkyBlue);
+            Label("lFoot", "", 545, 577, 190);
             Label("lTotal", "Total", 740, 577, 90);
             Field("eTotal", 834, 574, 130, true);
 
@@ -227,11 +242,11 @@ namespace EBHMaterialPlanning
             Place("gRows", 8, 374, w - 16, Math.Max(80, h - 374 - 40));
             gRows.FillWidth("Desc", w - 16);
             Place("bCreate", 8, h - 30, 0, 0);
-            Place("2", 162, h - 30, 0, 0);
-            Place("bLinked", 236, h - 30, 0, 0);
-            Place("bLastPr", 366, h - 30, 0, 0);
-            Place("bCreatePo", 562, h - 30, 0, 0);
-            Place("lFoot", 718, h - 27, 0, 0);
+            Place("bItr", 132, h - 30, 0, 0);
+            Place("bCombine", 276, h - 30, 0, 0);
+            Place("2", 380, h - 30, 0, 0);
+            Place("bLinked", 449, h - 30, 0, 0);
+            Place("lFoot", 545, h - 27, 0, 0);
             Place("lTotal", w - 240, h - 27, 0, 0);
             Place("eTotal", w - 146, h - 30, 0, 0);
         }
@@ -262,6 +277,19 @@ namespace EBHMaterialPlanning
         private SAPbouiCOM.Conditions NewConditions()
         {
             return (SAPbouiCOM.Conditions)App.CreateObject(SAPbouiCOM.BoCreatableObjectType.cot_Conditions);
+        }
+
+        /// <summary>
+        /// Resets the row-level Warehouse Choose From List to exactly "active warehouses" each time it opens.
+        /// </summary>
+        private void FilterWarehouseCfl(string colUid)
+        {
+            SAPbouiCOM.Conditions cons = NewConditions();
+            SAPbouiCOM.Condition con = cons.Add();
+            con.Alias = "Inactive";
+            con.Operation = SAPbouiCOM.BoConditionOperation.co_EQUAL;
+            con.CondVal = "N";
+            Form.ChooseFromLists.Item("cfl" + gRows.Uid + colUid).SetConditions(cons);
         }
 
         /// <summary>Narrows the Production Order Choose From List (eFind) to the project currently typed, if any.</summary>
@@ -406,12 +434,15 @@ namespace EBHMaterialPlanning
         /// edits are propagated back onto its members - see ReadRow / Apply.
         /// <paramref name="ignoreFilter"/>: group every row whatever the Manufacturer filter shows (used by Create).
         /// </summary>
+        /// <summary>Rows with the same key are shown (and created) as one grouped row.</summary>
+        private static string GroupKey(PlanRow r) { return r.Catalog + "|" + r.ItemCode + "|" + r.Vendor + "|" + r.Description; }
+
         private List<PlanRow> Visible(bool ignoreFilter = false)
         {
             string man = ignoreFilter ? "" : Get("cMan");
             var filtered = man.Length == 0 ? rows : rows.Where(r => r.Manufacturer == man).ToList();
             return filtered
-                .GroupBy(r => r.Catalog + "|" + r.ItemCode + "|" + r.Vendor + "|" + r.Description)
+                .GroupBy(GroupKey)
                 .OrderBy(g => g.First().ItemCode).ThenBy(g => g.First().Vendor)
                 .Select(g =>
                 {
@@ -426,6 +457,8 @@ namespace EBHMaterialPlanning
                         PdoEntry = first.PdoEntry, PdoNum = first.PdoNum, PdoLine = first.PdoLine,
                         ItemCode = first.ItemCode, Description = first.Description, Uom = first.Uom,
                         Quantity = members.Sum(m => m.Quantity), Balance = members.Sum(m => m.Balance),
+                        PrQuantity = members.Sum(m => m.PrQuantity), ItrQuantity = members.Sum(m => m.ItrQuantity),
+                        FromWarehouse = members.Select(m => m.FromWarehouse).FirstOrDefault(w => w.Length > 0) ?? "",
                         AlreadyRequested = members.Sum(m => m.AlreadyRequested),
                         HasLinkedRequest = members.Any(m => m.HasLinkedRequest),
                         Price = cheapest.Price, Discount = cheapest.Discount, PriceAfterDiscount = cheapest.PriceAfterDiscount,
@@ -440,26 +473,38 @@ namespace EBHMaterialPlanning
                 }).ToList();
         }
 
+        /// <summary>Job Code(s) of a row: every distinct Production Order product of its member components (for a
+        /// grouped row), comma-separated. Only components whose Item Group tracks the Job Code contribute.</summary>
+        private static string JobCodes(PlanRow r)
+        {
+            IEnumerable<PlanRow> members = r.MergedFrom ?? new List<PlanRow> { r };
+            return string.Join(", ", members.Where(m => m.TracksJobCode && m.PdoItemCode.Length > 0)
+                .Select(m => m.PdoItemCode).Distinct().ToArray());
+        }
+
         private void ShowRows()
         {
             view = gRows.Sort(Visible(), (c, r) => c == "Catalog" ? r.Catalog : c == "Item" ? r.ItemCode
                 : c == "Desc" ? r.Description : c == "Man" ? r.ManufacturerName : c == "Vend" ? r.Vendor
-                : c == "Whs" ? r.Warehouse : c == "Req" ? r.RequiredDate : c == "Valid" ? r.ValidUntil : "");     // dates are yyyy-MM-dd: text order = date order
+                : c == "Whs" ? r.Warehouse : c == "FWhs" ? r.FromWarehouse : c == "Req" ? r.RequiredDate : c == "Valid" ? r.ValidUntil : "");     // dates are yyyy-MM-dd: text order = date order
             Freeze(() =>
             {
                 gRows.Fill(view.Select((r, i) => new object[]
                 {
-                    i + 1, r.Selected ? "Y" : "N", r.Catalog, r.ItemCode, r.Description, r.TracksJobCode ? r.PdoItemCode : "", r.ManufacturerName, r.Quantity, r.Uom, r.PriceAfterDiscount, r.Total,
+                    i + 1, r.Selected ? "Y" : "N", r.Catalog, r.ItemCode, r.Description, JobCodes(r), r.ManufacturerName,
+                    r.Quantity, r.PrQuantity, r.ItrQuantity, r.FromWarehouse, r.Uom, r.PriceAfterDiscount, r.Total,
                     r.Warehouse, stock.InStock(r.ItemCode, r.Warehouse), stock.ProjectStock(r.ItemCode, r.Warehouse, r.Project), stock.MainLocStock(r.ItemCode),
                     r.Vendor, ToDate(r.RequiredDate), ToDate(r.ValidUntil), Base(r)
                 }).ToList());
+                // Red: PRQTY + ITRQTY is more than Quantity, or a quantity is negative / both are 0
                 for (int i = 0; i < view.Count; i++)
-                    gRows.Color(i, !view[i].Selected ? GridTable.Grey : view[i].Quantity > view[i].Balance ? GridTable.Red
+                    gRows.Color(i, !view[i].Selected ? GridTable.Grey : !QuantitiesOk(view[i]) ? GridTable.Red
                         : view[i].HasLinkedRequest ? GridTable.SkyBlue : GridTable.Lavender);
                 // The Total stays the grand total of every selected row (any Manufacturer): what Create would actually
-                // request, not just what happens to be visible under the current filter.
+                // request (PRQTY x price), not just what happens to be visible under the current filter.
                 decimal total = rows.Where(r => r.Selected).Sum(r => r.Total);
                 Set("eTotal", total);
+                decimal itrTotal = rows.Where(r => r.Selected).Sum(r => r.ItrQuantity);
                 int linked = view.Count(r => r.HasLinkedRequest);
                 string man = Get("cMan");
                 int manCount = man.Length == 0 ? rows.Count : rows.Count(r => r.Manufacturer == man);
@@ -469,31 +514,55 @@ namespace EBHMaterialPlanning
                 // one Purchase Request line per group shown, quantity = the group's own total (see CreateRequest).
                 string grouped = view.Count != rows.Count
                     ? " (grouped from " + rows.Count + " source component row(s) by Catalog No. + Item No. + Vendor + Description)" : "";
-                if (rows.Count > 0) Caption("lFoot", view.Count(r => r.Selected) + " of " + view.Count + " row(s) selected" + filtered + grouped +
-                    (linked > 0 ? " (" + linked + " shown in green: source Production Order already has a Purchase Request)" : ""));
+                if (rows.Count > 0) Caption("lFoot", view.Count(r => r.Selected) + " of " + view.Count + " row(s) selected" +
+                    (itrTotal > 0 ? ", ITR qty " + itrTotal.ToString("0.######", Inv) : "") + filtered + grouped +
+                    (linked > 0 ? " (" + linked + " shown in blue: source Production Order already has a request)" : ""));
             });
         }
 
+        /// <summary>The row's own quantity rules: PRQTY / ITRQTY not negative, not both 0, together not above Quantity.</summary>
+        private static bool QuantitiesOk(PlanRow r)
+        {
+            return r.PrQuantity >= 0 && r.ItrQuantity >= 0 && (r.PrQuantity != 0 || r.ItrQuantity != 0) && r.PrQuantity + r.ItrQuantity <= r.Quantity;
+        }
+
+        /// <summary>Spreads a merged row's typed total over its members in proportion to each member's own Quantity
+        /// (its open balance), the last member taking the rounding remainder so the members always add up exactly.</summary>
+        private static void Spread(List<PlanRow> members, decimal total, Action<PlanRow, decimal> set)
+        {
+            decimal whole = members.Sum(m => m.Quantity), given = 0;
+            for (int i = 0; i < members.Count; i++)
+            {
+                decimal share = i == members.Count - 1 ? total - given
+                    : whole > 0 ? Math.Round(total * (members[i].Quantity / whole), 6) : Math.Round(total / members.Count, 6);
+                set(members[i], share);
+                given += share;
+            }
+        }
+
         /// <summary>Takes what the user typed in one visible grid row into the model. A merged row (see Visible) has
-        /// no Purchase Request line of its own, so every edit is also propagated onto its member rows - Warehouse / Vendor / Required Date / Valid Until / Selected applied as typed to each member,
-        /// Quantity redistributed across them in their original proportion (each member still capped by its own
-        /// source component's Balance at Create time).</summary>
+        /// no document line of its own, so every edit is also propagated onto its member rows - Warehouse / Vendor /
+        /// From Warehouse / Required Date / Valid Until / Selected applied as typed to each member, PRQTY and ITRQTY
+        /// spread across them in proportion to each member's own Quantity (see Spread).</summary>
         private void ReadRow(int tr)
         {
             PlanRow r = view[tr];
             r.Selected = gRows.TypedText(tr, "Sel") == "Y";
-            r.Quantity = gRows.Typed(tr, "Qty");
+            r.PrQuantity = gRows.Typed(tr, "PrQty");
+            r.ItrQuantity = gRows.Typed(tr, "ItrQty");
+            r.FromWarehouse = gRows.TypedText(tr, "FWhs");
             r.Warehouse = gRows.TypedText(tr, "Whs");
             r.Vendor = gRows.TypedText(tr, "Vend");
             r.RequiredDate = gRows.TypedDate(tr, "Req");
             r.ValidUntil = gRows.TypedDate(tr, "Valid");
             if (r.MergedFrom == null) return;
-            decimal originalTotal = r.MergedFrom.Sum(m => m.Quantity);
+            Spread(r.MergedFrom, r.PrQuantity, (m, q) => m.PrQuantity = q);
+            Spread(r.MergedFrom, r.ItrQuantity, (m, q) => m.ItrQuantity = q);
             foreach (PlanRow m in r.MergedFrom)
             {
                 m.Selected = r.Selected;
-                m.Quantity = originalTotal > 0 ? Math.Round(r.Quantity * (m.Quantity / originalTotal), 6) : r.Quantity / r.MergedFrom.Count;
                 m.Warehouse = r.Warehouse; m.Vendor = r.Vendor;
+                m.FromWarehouse = r.FromWarehouse;
                 m.RequiredDate = r.RequiredDate; m.ValidUntil = r.ValidUntil;
             }
         }
@@ -548,35 +617,69 @@ namespace EBHMaterialPlanning
             else Ok(view.Count + " of " + rows.Count + " row(s) match Manufacturer " + man + ".");
         }
 
-        private void CreateRequest()
+        /// <summary>
+        /// The Purchase Request button (PRQTY rows), the Inventory Transfer Request button (ITRQTY rows) or Combine
+        /// (both documents, in one SAP transaction). One document line per selected group; every selected row is
+        /// included, also one the Manufacturer filter currently hides (the footer Total already counts it). Every
+        /// source Production Order component a group stands for is recorded separately (@EBH_PRQMAP / @EBH_ITRMAP), so
+        /// it is recognised as "already requested" the next time its Production Order is loaded.
+        /// </summary>
+        private void CreateDocuments(PlanService.CreateKind kind)
         {
             for (int i = 0; i < view.Count; i++) ReadRow(i);
-            // One Purchase Request line per selected group, quantity = the group's own combined total. Every selected
-            // row is included, also one the Manufacturer filter currently hides (the footer Total already counts it).
-            // Every source Production Order component a group stands for is recorded separately in @EBH_PRQMAP (see
-            // PlanStore.CreatePurchaseRequest), so a component merged into someone else's line is still recognised as
-            // "already requested" the next time its Production Order is loaded.
-            var selected = Visible(true).Where(r => r.Selected).ToList();
-            if (selected.Count == 0) throw new PlanException(400, "Select at least one material row.", "gRows");
-            int sourceComponents = selected.Sum(r => r.MergedFrom != null && r.MergedFrom.Count > 0 ? r.MergedFrom.Count : 1);
-            decimal totalQty = selected.Sum(r => r.Quantity);
-            if (!Ask(
-                selected.Count + " consolidated material group(s) are selected, from " + sourceComponents + " source Production Order component row(s). " +
-                "One Purchase Request with " + selected.Count + " line(s) will be created (total quantity " + totalQty.ToString("0.######") + "). " +
-                "Source Production Order traceability will be retained. Continue?", "Create", "Cancel")) return;
-            CreatedRequest made = PlanService.Create(ReadHeader(), selected);
-            // One request per load: the rows are cleared so Create cannot be pressed twice for the same materials
+            // Rows on screen first, in the grid's own order, so "Row n" in a message is the grid's # column; rows
+            // hidden by the Manufacturer filter (still created) follow
+            var shown = view.Select(GroupKey).ToList();
+            var groups = Visible(true).OrderBy(g => { int at = shown.IndexOf(GroupKey(g)); return at < 0 ? int.MaxValue : at; }).ToList();
+            PlanHeader h = ReadHeader();
+            PlanService.Validate(h, groups, kind);
+            var prRows = PlanService.PrRows(groups, kind);
+            var itrRows = PlanService.ItrRows(groups, kind);
+
+            var question = new List<string>();
+            if (prRows.Count > 0)
+                question.Add("One Purchase Request with " + prRows.Count + " line(s), total PRQTY " + prRows.Sum(r => r.PrQuantity).ToString("0.######", Inv) + ".");
+            if (itrRows.Count > 0)
+                question.Add("One Inventory Transfer Request with " + itrRows.Count + " line(s), total ITRQTY " + itrRows.Sum(r => r.ItrQuantity).ToString("0.######", Inv) + ".");
+            // Quantity typed for the other document is not created by this button - say so, so it is not a surprise
+            if (kind == PlanService.CreateKind.PurchaseRequest && groups.Any(r => r.Selected && r.ItrQuantity > 0))
+                question.Add("ITRQTY on the selected rows is NOT included - use Inventory Transfer Req. or PR + ITR for it.");
+            if (kind == PlanService.CreateKind.TransferRequest && groups.Any(r => r.Selected && r.PrQuantity > 0))
+                question.Add("PRQTY on the selected rows is NOT included - use Purchase Request or PR + ITR for it.");
+            List<string> shortfalls = PlanService.TransferWarnings(groups, kind);
+            if (shortfalls.Count > 0)
+                question.Add("Warning - not enough stock to transfer:" + Environment.NewLine + string.Join(Environment.NewLine, shortfalls.Take(6).ToArray()) +
+                    (shortfalls.Count > 6 ? Environment.NewLine + "... and " + (shortfalls.Count - 6) + " more." : ""));
+            question.Add("Source Production Order traceability will be retained. Continue?");
+            if (!Ask(string.Join(Environment.NewLine, question.ToArray()), "Create", "Cancel")) return;
+
+            // Already validated above: create directly instead of PlanService.Create, which would run the checks again
+            CreatedDocuments made = Store.CreateDocuments(h, prRows, itrRows);
+            // One press per load: the rows are cleared so Create cannot be pressed twice for the same materials
             rows = new List<PlanRow>();
             ShowRows();
-            lastPrEntry = made.DocEntry; lastPrNum = made.DocNum; lastPrProject = Text("eProj");
-            ButtonCaption("bLastPr", "Open Purchase Request " + made.DocNum);
-            Visible("bLastPr", true);
+            HideLastPr();
+            var done = new List<string>();
+            if (made.Pr != null)
+            {
+                lastPrEntry = made.Pr.DocEntry; lastPrNum = made.Pr.DocNum; lastPrProject = Text("eProj");
+                ButtonCaption("bLastPr", "Open Purchase Request " + made.Pr.DocNum);
+                Visible("bLastPr", true);
+                done.Add("Purchase Request " + made.Pr.DocNum + " (" + prRows.Count + " line(s))");
+            }
+            if (made.Itr != null)
+            {
+                lastItrEntry = made.Itr.DocEntry;
+                ButtonCaption("bLastItr", "Open Transfer Request " + made.Itr.DocNum);
+                Visible("bLastItr", true);
+                done.Add("Inventory Transfer Request " + made.Itr.DocNum + " (" + itrRows.Count + " line(s))");
+            }
+            PlaceDocButtons();
             // Re-searches the Production Orders grid with whatever filters are already set, so its progress count
-            // and colour (driven by @EBH_PRQMAP - see PlanStore.ComponentProgress) reflect the request just created
-            // immediately, instead of looking stale until the user clicks Search themselves.
+            // and colour reflect the documents just created immediately.
             Search();
             if (made.Warning.Length > 0) Warn(made.Warning);
-            Done("Purchase Request " + made.DocNum + " was created with " + selected.Count + " line(s), from " + sourceComponents + " source component(s).");
+            Done(string.Join(" and ", done.ToArray()) + " created.");
         }
 
         /// <summary>Opens Purchase Order Planning already searched and loaded for the just-created Purchase Request, so punching the Purchase Order from it is a single click away.</summary>
@@ -586,10 +689,26 @@ namespace EBHMaterialPlanning
             PurchaseOrderForm.ShowForRequest(lastPrNum, lastPrProject);
         }
 
+        /// <summary>Lines the visible "Open ..." buttons up side by side on the Materials header row, starting at the
+        /// same left edge, so an ITR-only result does not leave a gap where the hidden Purchase Request button sits.</summary>
+        private void PlaceDocButtons()
+        {
+            int left = 320;
+            foreach (string uid in new[] { "bLastPr", "bLastItr", "bCreatePo" })
+            {
+                SAPbouiCOM.Item it = Item(uid);
+                if (!it.Visible) continue;
+                Place(uid, left, 348, 0, 0);
+                left += it.Width + 6;
+            }
+        }
+
         private void HideLastPr()
         {
             lastPrEntry = 0;
+            lastItrEntry = 0;
             Visible("bLastPr", false);
+            Visible("bLastItr", false);
             Visible("bCreatePo", false);
         }
 
@@ -616,7 +735,8 @@ namespace EBHMaterialPlanning
             if (Key(e, 'F', SAPbouiCOM.BoModifiersEnum.mt_CTRL)) Focus("eFind");
             else if (Key(e, 116)) Search();                                                                   // F5
             else if (Key(e, 'L', SAPbouiCOM.BoModifiersEnum.mt_ALT)) Focus("gRows");
-            else if (Key(e, 13, SAPbouiCOM.BoModifiersEnum.mt_CTRL)) CreateRequest();
+            else if (Key(e, 13, SAPbouiCOM.BoModifiersEnum.mt_CTRL)) CreateDocuments(PlanService.CreateKind.PurchaseRequest);
+            else if (e.EventType == SAPbouiCOM.BoEventTypes.et_CHOOSE_FROM_LIST && e.BeforeAction && e.ItemUID == "gRows" && e.ColUID == "Whs") FilterWarehouseCfl(e.ColUID);
             else if (e.EventType == SAPbouiCOM.BoEventTypes.et_CHOOSE_FROM_LIST && e.BeforeAction && e.ItemUID == "eProj") FilterProjectCfl();
             else if (e.EventType == SAPbouiCOM.BoEventTypes.et_CHOOSE_FROM_LIST && e.BeforeAction && e.ItemUID == "eFind") FilterFindCfl();
             else if ((chosen = ChosenCodes(e, "eProj", "PrjCode")).Count > 0) Set("eProj", chosen[0]);
@@ -657,8 +777,11 @@ namespace EBHMaterialPlanning
             else if (Pressed(e, "bApply")) Apply();
             else if (Pressed(e, "bSelAll")) SetAllSelected(true);
             else if (Pressed(e, "bDeselAll")) SetAllSelected(false);
-            else if (Pressed(e, "bCreate")) CreateRequest();
+            else if (Pressed(e, "bCreate")) CreateDocuments(PlanService.CreateKind.PurchaseRequest);
+            else if (Pressed(e, "bItr")) CreateDocuments(PlanService.CreateKind.TransferRequest);
+            else if (Pressed(e, "bCombine")) CreateDocuments(PlanService.CreateKind.Both);
             else if (Pressed(e, "bLastPr")) { if (lastPrEntry > 0) Store.OpenPurchaseRequest(lastPrEntry); }
+            else if (Pressed(e, "bLastItr")) { if (lastItrEntry > 0) Store.OpenTransferRequest(lastItrEntry); }
             else if (Pressed(e, "bCreatePo")) CreatePo();
             else if (Pressed(e, "bLinked")) LinkedRequestForm.Show(CurrentPdo());
             else if (Clicked(e, gRows)) gRows.Click(e.Row);
@@ -711,7 +834,8 @@ namespace EBHMaterialPlanning
                 if (tr >= 0 && tr < view.Count) Store.OpenItem(view[tr].ItemCode);
             }
             else if (e.ItemUID == "gRows" && !e.BeforeAction && e.Row >= 0 &&
-                ((e.EventType == SAPbouiCOM.BoEventTypes.et_VALIDATE && e.ItemChanged) || (e.EventType == SAPbouiCOM.BoEventTypes.et_ITEM_PRESSED && e.ColUID == "Sel")))
+                ((e.EventType == SAPbouiCOM.BoEventTypes.et_VALIDATE && e.ItemChanged) || (e.EventType == SAPbouiCOM.BoEventTypes.et_ITEM_PRESSED && e.ColUID == "Sel")
+                 || (e.EventType == SAPbouiCOM.BoEventTypes.et_COMBO_SELECT && e.ColUID == "FWhs")))
             {
                 int tr = gRows.Row(e.Row);
                 if (tr < 0 || tr >= view.Count) return;
